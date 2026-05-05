@@ -1,0 +1,99 @@
+company,domain,source_type,where_to_scrape,difficulty,notes
+Salesforce,salesforce.com,public,Investor Relations / SEC filings,easy,Annual revenue
+HubSpot,hubspot.com,public,Investor Relations / SEC filings,easy,SaaS benchmark
+Datadog,datadog.com,public,Investor Relations / SEC filings,easy,Strong devtools row
+Snowflake,snowflake.com,public,Investor Relations / SEC filings,easy,Large enterprise SaaS
+Cloudflare,cloudflare.com,public,Investor Relations / SEC filings,easy,Infra/security
+MongoDB,mongodb.com,public,Investor Relations / SEC filings,easy,Database SaaS
+Twilio,twilio.com,public,Investor Relations / SEC filings,easy,Communications API
+GitLab,gitlab.com,public,Investor Relations / SEC filings,easy,Good devtools
+Atlassian,atlassian.com,public,Investor Relations,easy,Global SaaS
+Asana,asana.com,public,Investor Relations,easy,Productivity
+Box,box.com,public,Investor Relations,easy,Enterprise storage
+Dropbox,dropbox.com,public,Investor Relations,easy,Collaboration
+Zoom,zoom.us,public,Investor Relations,easy,Video SaaS
+Monday,monday.com,public,Investor Relations,easy,Work management
+Smartsheet,smartsheet.com,public,Investor Relations,easy,Work management
+Freshworks,freshworks.com,public,Investor Relations,easy,CRM/support
+Bill.com,bill.com,public,Investor Relations,easy,Fintech SaaS
+Okta,okta.com,public,Investor Relations,easy,Identity SaaS
+CrowdStrike,crowdstrike.com,public,Investor Relations,easy,Security SaaS
+Zscaler,zscaler.com,public,Investor Relations,easy,Security SaaS
+PagerDuty,pagerduty.com,public,Investor Relations,easy,Ops SaaS
+Fastly,fastly.com,public,Investor Relations,easy,Infra
+Paycom,paycom.com,public,Investor Relations,easy,HR SaaS
+Paylocity,paylocity.com,public,Investor Relations,easy,HR SaaS
+Workday,workday.com,public,Investor Relations,easy,Enterprise HR
+ZoomInfo,zoominfo.com,public,Investor Relations,easy,Sales data
+Klaviyo,klaviyo.com,public,Investor Relations,easy,Ecommerce SaaS
+Braze,braze.com,public,Investor Relations,easy,Marketing SaaS
+UiPath,uipath.com,public,Investor Relations,easy,Automation SaaS
+Samsara,samsara.com,public,Investor Relations,easy,IoT SaaS
+Toast,pos.toasttab.com,public,Investor Relations,easy,Restaurant SaaS
+Procore,procore.com,public,Investor Relations,easy,Construction SaaS
+HashiCorp,hashicorp.com,public,Investor Relations,easy,Infra tooling
+Elastic,elastic.co,public,Investor Relations,easy,Search/data SaaS
+Confluent,confluent.io,public,Investor Relations,easy,Streaming data
+Docusign,docusign.com,public,Investor Relations,easy,Signature SaaS
+Adobe,adobe.com,public,Annual reports,easy,Subscription software
+Intuit,intuit.com,public,Annual reports,easy,SMB software
+ServiceNow,servicenow.com,public,Investor Relations,easy,Enterprise workflow
+Autodesk,autodesk.com,public,Annual reports,easy,Subscription software
+Notion,notion.so,private,TechCrunch / interviews,medium,ARR often cited
+Linear,linear.app,private,Founder interviews / articles,medium,ARR sometimes cited
+Canva,canva.com,private,Funding news / interviews,medium,Revenue cited often
+Airtable,airtable.com,private,Funding news,medium,ARR mentions
+Miro,miro.com,private,Funding news,medium,Revenue estimates cited
+Calendly,calendly.com,private,Funding news,easy,Revenue publicly cited before
+Intercom,intercom.com,private,Interviews / articles,medium,ARR sometimes cited
+Brex,brex.com,private,Funding coverage,medium,Revenue mentions
+Deel,deel.com,private,Funding coverage,easy,ARR frequently cited
+Rippling,rippling.com,private,Funding coverage,medium,Revenue sometimes cited
+Zapier,zapier.com,private,Interviews / podcasts,medium,Bootstrapped metrics
+ClickUp,clickup.com,private,Funding coverage,medium,ARR mentions
+Retool,retool.com,private,Funding coverage,medium,B2B growth
+Vercel,vercel.com,private,Interviews / coverage,medium,Revenue estimates
+Supabase,supabase.com,private,Founder content,medium,MRR sometimes shared
+Webflow,webflow.com,private,Funding coverage,medium,Revenue mentions
+Figma,figma.com,private,Acquisition docs / coverage,easy,Revenue widely reported
+Loom,loom.com,private,Funding coverage,medium,Revenue estimates
+Gusto,gusto.com,private,Funding coverage,medium,Payroll SaaS
+BambooHR,bamboohr.com,private,Articles / interviews,medium,HR SaaS
+Typeform,typeform.com,private,Funding coverage,medium,SMB SaaS
+SurveyMonkey,momentive.ai,public,Investor Relations,easy,Survey SaaS
+Mailchimp,mailchimp.com,private,Acquisition coverage,easy,Revenue reported on sale
+Ahrefs,ahrefs.com,private,Founder interviews,medium,Bootstrapped SEO SaaS
+Semrush,semrush.com,public,Investor Relations,easy,SEO SaaS
+Buffer,buffer.com,private,Open metrics blog,easy,Transparent revenue history
+Basecamp,basecamp.com,private,Founder posts,medium,Historic estimates
+ConvertKit,kit.com,private,Founder transparency,easy,MRR/ARR shared
+Beehiiv,beehiiv.com,private,Founder content,easy,Revenue shared online
+Plausible,plausible.io,private,Open startup metrics,easy,Small SaaS row
+Transistor,transistor.fm,private,Open startup metrics,easy,Podcast SaaS
+Carrd,carrd.co,private,Creator interviews,medium,Micro SaaS
+Lemon Squeezy,lemonsqueezy.com,private,Acquisition coverage,easy,Revenue often cited
+Gorgias,gorgias.com,private,Funding coverage,medium,Ecommerce SaaS
+Recharge,rechargepayments.com,private,Funding coverage,medium,Ecommerce SaaS
+Yotpo,yotpo.com,private,Funding coverage,medium,Ecommerce SaaS
+ShipBob,shipbob.com,private,Funding coverage,medium,Ops SaaS
+Drata,drata.com,private,Funding coverage,medium,Compliance SaaS
+Vanta,vanta.com,private,Funding coverage,easy,ARR frequently cited
+Wiz,wiz.io,private,Funding coverage,easy,Revenue widely reported
+Snyk,snyk.io,private,Funding coverage,easy,ARR often reported
+Databricks,databricks.com,private,Funding coverage,easy,Revenue widely cited
+OpenAI,openai.com,private,Media reports,hard,Not pure SaaS but useful benchmark
+Mural,mural.co,private,Funding coverage,medium,Collaboration SaaS
+Coda,coda.io,private,Funding coverage,medium,Productivity SaaS
+Aha!,aha.io,private,Founder content,medium,Bootstrapped SaaS
+Keap,keap.com,private,Articles,medium,CRM SaaS
+Pipedrive,pipedrive.com,private,Acquisition coverage,easy,Revenue reported
+Zendesk,zendesk.com,public,Annual reports,easy,Support SaaS
+Freshdesk,freshworks.com,public,Investor Relations,easy,Use Freshworks parent
+Qualtrics,qualtrics.com,public,Annual reports,easy,Experience SaaS
+Coupa,coupa.com,public,Annual reports,easy,B2B spend SaaS
+Zuora,zuora.com,public,Investor Relations,easy,Subscription SaaS
+Amplitude,amplitude.com,public,Investor Relations,easy,Analytics SaaS
+Mixpanel,mixpanel.com,private,Funding coverage,medium,Analytics SaaS
+Heap,heap.io,private,Acquisition coverage,easy,Analytics SaaS
+Segment,segment.com,private,Acquisition coverage,easy,Revenue on acquisition
+MuleSoft,mulesoft.com,public,Acquisition docs,easy,Integration SaaS
