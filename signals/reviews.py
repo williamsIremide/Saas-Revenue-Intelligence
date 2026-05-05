@@ -3,13 +3,12 @@ import httpx
 from bs4 import BeautifulSoup
 from datetime import UTC, datetime, timedelta
 from dotenv import load_dotenv
-from signals.cache import get_cache, set_cache, USE_CACHE, CACHE_VERSION
+from signals.cache import get_cache_if_fresh, set_cache, USE_CACHE, CACHE_VERSION
 
 load_dotenv()
 
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 
-# ── Anthropic client (optional — only used as a low-confidence fallback) ──────
 _anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 
 if _anthropic_api_key:
@@ -22,13 +21,11 @@ else:
 
 
 SLUG_OVERRIDES = {
-    "hubspot":     "hubspot-crm",
-    "salesforce":  "salesforce-crm",
-    "microsoft":   "microsoft-teams",
+    "hubspot":    "hubspot-crm",
+    "salesforce": "salesforce-crm",
+    "microsoft":  "microsoft-teams",
 }
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def normalize_domain(domain: str) -> str:
     return (
@@ -43,8 +40,6 @@ def normalize_domain(domain: str) -> str:
 def extract_slug(domain: str) -> str:
     return normalize_domain(domain).split(".")[0]
 
-
-# ── Parsing ───────────────────────────────────────────────────────────────────
 
 REVIEW_REGEX = [
     r'see all\s+([\d,]+)\s+\w',
@@ -135,8 +130,6 @@ def calc_velocity_90d(dates: list[datetime]) -> int:
     return sum(1 for d in dates if d >= cutoff)
 
 
-# ── Scoring ───────────────────────────────────────────────────────────────────
-
 def sentiment_from_rating(rating: float) -> float:
     if rating <= 0:
         return 0.0
@@ -178,16 +171,13 @@ def extract_sentiment_keywords(text: str) -> float:
     return pos / (pos + neg)
 
 
-# ── Claude fallback ───────────────────────────────────────────────────────────
-
 async def extract_with_claude(text: str) -> tuple[float, int]:
-    """Use Claude Haiku to extract review data when heuristics have low confidence.
-    Returns safe defaults if the API key is missing or the call fails."""
+    """Use Claude Haiku to extract review data when heuristics have low confidence."""
     if anthropic_client is None:
         return 0.0, 0
 
     try:
-        from anthropic.types import TextBlock  # local import — only reached when client exists
+        from anthropic.types import TextBlock
         prompt = (
             "Extract review data from this page text.\n"
             "Return JSON only, no markdown, no explanation:\n"
@@ -219,13 +209,11 @@ async def extract_with_claude(text: str) -> tuple[float, int]:
         return 0.0, 0
 
 
-# ── Fetchers ──────────────────────────────────────────────────────────────────
-
 async def fetch_page(url: str) -> str:
     providers = []
 
-    scrapfly_key  = os.getenv("SCRAPFLY_API_KEY")
-    scrapedo_key  = os.getenv("SCRAPEDO_API_KEY")
+    scrapfly_key   = os.getenv("SCRAPFLY_API_KEY")
+    scrapedo_key   = os.getenv("SCRAPEDO_API_KEY")
     scraperapi_key = os.getenv("SCRAPER_API_KEY")
 
     if scrapfly_key:
@@ -305,26 +293,33 @@ async def fetch_g2(slug: str) -> tuple[str, str]:
     return "", "g2"
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+async def get_reviews_signal(domain: str, force_refresh: bool = False) -> dict:
+    """
+    Parameters
+    ----------
+    domain        : str
+    force_refresh : bool  Bypass Redis cache if True.
 
-async def get_reviews_signal(domain: str) -> dict:
+    Note: server.py will supplement this with Crustdata G2/Glassdoor data
+    if this returns total_reviews=0. No changes needed here for that path.
+    """
     normalized = normalize_domain(domain)
     slug       = extract_slug(domain)
 
     cache_key = f"reviews:{CACHE_VERSION}:{normalized}"
-    cached = get_cache(cache_key)
+    cached = get_cache_if_fresh(cache_key, force_refresh=force_refresh)
     if USE_CACHE and cached:
         return cached
 
     empty: dict = {
-        "total_reviews":      0,
-        "rating":             0.0,
+        "total_reviews":       0,
+        "rating":              0.0,
         "review_velocity_90d": 0,
-        "sentiment_score":    0.0,
-        "momentum_score":     0.0,
-        "source":             "none",
-        "product_slug":       slug,
-        "confidence":         0.0,
+        "sentiment_score":     0.0,
+        "momentum_score":      0.0,
+        "source":              "none",
+        "product_slug":        slug,
+        "confidence":          0.0,
     }
 
     tp_task = asyncio.create_task(fetch_trustpilot(slug, normalized))
@@ -372,21 +367,21 @@ async def get_reviews_signal(domain: str) -> dict:
     if source == "g2" and total < 5:
         return empty
 
-    sentiment_score  = sentiment_from_rating(rating)
+    sentiment_score   = sentiment_from_rating(rating)
     keyword_sentiment = extract_sentiment_keywords(text[:2000])
-    sentiment_score  = round(sentiment_score * 0.7 + keyword_sentiment * 0.3, 2)
+    sentiment_score   = round(sentiment_score * 0.7 + keyword_sentiment * 0.3, 2)
 
     momentum = momentum_score(total, velocity, rating)
 
     result = {
-        "total_reviews":      total,
-        "rating":             rating,
+        "total_reviews":       total,
+        "rating":              rating,
         "review_velocity_90d": velocity,
-        "sentiment_score":    sentiment_score,
-        "momentum_score":     momentum,
-        "source":             source,
-        "product_slug":       slug,
-        "confidence":         round(confidence, 2),
+        "sentiment_score":     sentiment_score,
+        "momentum_score":      momentum,
+        "source":              source,
+        "product_slug":        slug,
+        "confidence":          round(confidence, 2),
     }
 
     set_cache(cache_key, result)

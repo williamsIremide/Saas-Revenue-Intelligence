@@ -1,7 +1,7 @@
 import asyncio, os, json
 import httpx
 from bs4 import BeautifulSoup
-from signals.cache import get_cache, set_cache, USE_CACHE, CACHE_VERSION
+from signals.cache import get_cache_if_fresh, set_cache, USE_CACHE, CACHE_VERSION
 
 
 # ── Fetchers ──────────────────────────────────────────────────────────────────
@@ -101,7 +101,7 @@ async def fetch_rippling(client: httpx.AsyncClient, slug: str) -> tuple[list, st
 
 # ── Main engine ───────────────────────────────────────────────────────────────
 
-async def get_jobs(domain: str) -> dict:
+async def get_jobs(domain: str, force_refresh: bool = False) -> dict:
     normalized_domain = (
         domain.strip()
         .replace("https://", "")
@@ -111,7 +111,7 @@ async def get_jobs(domain: str) -> dict:
     )
 
     cache_key = f"hiring:{CACHE_VERSION}:{normalized_domain}"
-    cached = get_cache(cache_key)
+    cached = get_cache_if_fresh(cache_key, force_refresh=force_refresh)
     if USE_CACHE and cached:
         print(f"[hiring] cache hit: {normalized_domain}")
         return cached
@@ -159,18 +159,28 @@ async def get_jobs(domain: str) -> dict:
     return result
 
 
-async def get_hiring_signal(domain: str) -> dict:
+async def get_hiring_signal(domain: str, force_refresh: bool = False) -> dict:
+    """
+    Parameters
+    ----------
+    domain        : str
+    force_refresh : bool  Bypass Redis cache if True.
+
+    Note: if headcount.py (Crustdata) returned job_openings_count, server.py
+    will use that as a fallback when this function returns open_roles=0.
+    You don't need to change anything here — the fallback is in server.py.
+    """
     empty_result = {
-        "open_roles":       0,
+        "open_roles":        0,
         "engineering_roles": 0,
-        "sales_roles":      0,
-        "source":           "none",
-        "velocity_score":   0.0,
-        "raw_titles":       [],
+        "sales_roles":       0,
+        "source":            "none",
+        "velocity_score":    0.0,
+        "raw_titles":        [],
     }
 
     try:
-        jobs_data  = await get_jobs(domain)
+        jobs_data  = await get_jobs(domain, force_refresh=force_refresh)
         job_titles = jobs_data["titles"]
         source     = jobs_data["source"]
 
@@ -211,12 +221,12 @@ async def get_hiring_signal(domain: str) -> dict:
             velocity_score = 1.0
 
         return {
-            "open_roles":       open_roles,
+            "open_roles":        open_roles,
             "engineering_roles": engineering_roles,
-            "sales_roles":      sales_roles,
-            "source":           source,
-            "velocity_score":   velocity_score,
-            "raw_titles":       job_titles,
+            "sales_roles":       sales_roles,
+            "source":            source,
+            "velocity_score":    velocity_score,
+            "raw_titles":        job_titles,
         }
 
     except Exception as e:

@@ -6,19 +6,6 @@ and Farsight DNSDB into a single weekly-averaged rank list. It is:
   - Free, no API key required
   - Research-grade (cited in 800+ academic papers)
   - Updated daily, top-1M domains
-
-Strategy
---------
-1. On first call (or after TRANCO_CACHE_DAYS), download the latest Tranco CSV
-   (~10 MB compressed) into a local file cache at TRANCO_CACHE_DIR.
-2. Build an in-process dict { domain -> rank } from the full 1M rows.
-3. Look up the requested domain (try bare domain, then www-stripped, then
-   the apex from any subdomain).
-4. Convert rank to a 0-1 score on a log scale and estimate monthly visits.
-5. Cache the per-domain result in Redis (same TTL as other signals).
-
-The list is loaded once into module-level memory and reused across requests,
-so the 10 MB CSV only parses once per process lifetime.
 """
 
 import asyncio
@@ -35,24 +22,18 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
-from signals.cache import CACHE_VERSION, get_cache, set_cache, USE_CACHE
+from signals.cache import CACHE_VERSION, get_cache_if_fresh, set_cache, USE_CACHE
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
-
-# Where to store the downloaded Tranco CSV (survives process restarts)
 TRANCO_CACHE_DIR  = Path(os.getenv("TRANCO_CACHE_DIR", ".tranco"))
-# Re-download the list after this many days
 TRANCO_CACHE_DAYS = int(os.getenv("TRANCO_CACHE_DAYS", "3"))
-# Tranco API base
 TRANCO_API        = "https://tranco-list.eu"
 
-# ── Module-level list cache (loaded once per process) ────────────────────────
-_rank_dict: dict[str, int] = {}       # domain -> rank (1-indexed, lower = better)
-_list_loaded_at: float     = 0.0      # unix timestamp of last load
+_rank_dict: dict[str, int] = {}
+_list_loaded_at: float     = 0.0
 
 
 # ── Tranco download helpers ───────────────────────────────────────────────────
@@ -66,7 +47,6 @@ def _tranco_csv_path(list_id: str) -> Path:
 
 
 def _cached_list_id() -> str | None:
-    """Return the list_id stored from the last successful download, or None."""
     meta = _tranco_meta_path()
     if not meta.exists():
         return None
@@ -88,8 +68,6 @@ def _save_meta(list_id: str) -> None:
 
 
 async def _fetch_list_id(client: httpx.AsyncClient) -> str:
-    """Ask Tranco for the most recent available daily list ID."""
-    # Try the last 7 days to find one that's published
     for days_back in range(1, 8):
         date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         try:
@@ -106,11 +84,9 @@ async def _fetch_list_id(client: httpx.AsyncClient) -> str:
 
 
 async def _download_list(list_id: str, client: httpx.AsyncClient) -> None:
-    """Download the Tranco ZIP for list_id and save as a plain CSV."""
     TRANCO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     csv_path = _tranco_csv_path(list_id)
 
-    # Try ZIP endpoint first (faster)
     zip_url = f"{TRANCO_API}/download_daily/{list_id}"
     try:
         r = await client.get(zip_url, timeout=60)
@@ -124,7 +100,6 @@ async def _download_list(list_id: str, client: httpx.AsyncClient) -> None:
     except Exception as e:
         logger.debug(f"[traffic] ZIP download failed ({e}), trying plain CSV...")
 
-    # Fallback: plain CSV endpoint
     plain_url = f"{TRANCO_API}/download/{list_id}/1000000"
     r = await client.get(plain_url, timeout=90)
     if r.status_code != 200:
@@ -135,7 +110,6 @@ async def _download_list(list_id: str, client: httpx.AsyncClient) -> None:
 
 
 def _load_rank_dict(list_id: str) -> dict[str, int]:
-    """Parse the CSV into { domain: rank }.  Runs once per process."""
     csv_path = _tranco_csv_path(list_id)
     ranks: dict[str, int] = {}
     with csv_path.open(newline="", encoding="utf-8") as f:
@@ -151,22 +125,18 @@ def _load_rank_dict(list_id: str) -> dict[str, int]:
 
 
 async def _ensure_list_loaded() -> None:
-    """Download + parse the Tranco list if it isn't already in memory."""
     global _rank_dict, _list_loaded_at
 
-    # Already loaded and fresh enough?
     if _rank_dict and (time.time() - _list_loaded_at) < TRANCO_CACHE_DAYS * 86400:
         return
 
-    # Check local file cache first (avoids re-download after process restart)
     cached_id = _cached_list_id()
     if cached_id:
-        if not _rank_dict:                         # parse into memory if needed
+        if not _rank_dict:
             _rank_dict      = _load_rank_dict(cached_id)
             _list_loaded_at = time.time()
         return
 
-    # Need a fresh download
     async with httpx.AsyncClient(
         headers={"User-Agent": "saas-revenue-intelligence/1.0"},
         follow_redirects=True,
@@ -191,31 +161,20 @@ def _normalize(domain: str) -> str:
 
 
 def _lookup_rank(domain: str) -> int:
-    """
-    Try the domain as-is, then the apex (e.g. app.notion.so -> notion.so).
-    Returns -1 if not in the top-1M list.
-    """
     d = _normalize(domain)
     if d in _rank_dict:
         return _rank_dict[d]
-
-    # Try apex domain (last two labels)
     parts = d.split(".")
     if len(parts) > 2:
         apex = ".".join(parts[-2:])
         if apex in _rank_dict:
             return _rank_dict[apex]
-
     return -1
 
 
 # ── Score conversion ──────────────────────────────────────────────────────────
 
 def _rank_to_score(rank: int) -> float:
-    """
-    Convert Tranco rank to a 0-1 score on a log scale.
-    rank=1 -> 1.0, rank=1,000,000 -> ~0.0, rank=-1 (unlisted) -> 0.0
-    """
     if rank <= 0:
         return 0.0
     score = 1.0 - (math.log10(rank) / 6.0)
@@ -223,15 +182,6 @@ def _rank_to_score(rank: int) -> float:
 
 
 def _rank_to_monthly_visits(rank: int) -> int:
-    """
-    Estimate monthly visits from rank using a log-linear interpolation
-    anchored to known Similarweb reference points:
-      rank ~1     → 100M visits/mo
-      rank ~1,000 → ~1M visits/mo
-      rank ~10k   → ~150k visits/mo
-      rank ~100k  → ~20k visits/mo
-      rank ~1M    → ~5k visits/mo
-    """
     if rank <= 0:
         return 0
     log_rank   = math.log10(max(rank, 1))
@@ -240,12 +190,6 @@ def _rank_to_monthly_visits(rank: int) -> int:
 
 
 def _rank_to_confidence(rank: int) -> float:
-    """
-    Confidence in the traffic signal.
-    Listed domains get full confidence; unlisted get 0.
-    Low-rank (high-traffic) domains get slightly higher confidence
-    because the Tranco aggregation is more stable for popular sites.
-    """
     if rank <= 0:
         return 0.0
     if rank <= 10_000:
@@ -257,22 +201,21 @@ def _rank_to_confidence(rank: int) -> float:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-async def get_traffic_signal(domain: str) -> dict:
+async def get_traffic_signal(domain: str, force_refresh: bool = False) -> dict:
     """
     Return a traffic signal dict for the given domain.
 
-    Keys
-    ----
-    monthly_visits_estimate : int    estimated monthly unique visits
-    rank                    : int    Tranco rank (1=highest traffic, -1=unlisted)
-    rank_score              : float  0-1 score (independent of hiring)
-    source                  : str    always "tranco"
-    confidence              : float  0-1 confidence in the estimate
+    Parameters
+    ----------
+    domain        : str
+    force_refresh : bool  If True, bypass Redis cache and re-lookup from Tranco.
+                          Note: Tranco itself is cached on disk for TRANCO_CACHE_DAYS
+                          days — force_refresh only bypasses the per-domain Redis entry.
     """
     normalized = _normalize(domain)
     cache_key  = f"traffic:{CACHE_VERSION}:{normalized}"
 
-    cached = get_cache(cache_key)
+    cached = get_cache_if_fresh(cache_key, force_refresh=force_refresh)
     if USE_CACHE and cached:
         logger.debug(f"[traffic] cache hit: {normalized}")
         return cached
@@ -304,29 +247,17 @@ async def get_traffic_signal(domain: str) -> dict:
         "confidence":              confidence,
     }
 
-    # Only cache positive results — unlisted might just be a new domain
     if rank > 0:
         set_cache(cache_key, result)
 
     return result
 
 
-# ---------------------------------------------------------------------------
-# CLI smoke test
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
-    import asyncio
-
     test_domains = [
-        "notion.so",
-        "hubspot.com",
-        "linear.app",
-        "salesforce.com",
-        "plausible.io",
-        "vercel.com",
-        "beehiiv.com",
-        "carrd.co",
+        "notion.so", "hubspot.com", "linear.app",
+        "salesforce.com", "plausible.io", "vercel.com",
+        "beehiiv.com", "carrd.co",
     ]
 
     async def _test():

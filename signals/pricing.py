@@ -2,13 +2,10 @@ import asyncio, os, json, re
 import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from signals.cache import CACHE_VERSION, get_cache, set_cache, USE_CACHE
+from signals.cache import CACHE_VERSION, get_cache_if_fresh, set_cache, USE_CACHE
 
 load_dotenv()
 
-# ── Anthropic client (optional — only used as a low-confidence fallback) ──────
-# If ANTHROPIC_API_KEY is not set the module still imports fine;
-# extract_with_claude() will return safe defaults instead of crashing.
 _anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 
 if _anthropic_api_key:
@@ -20,11 +17,8 @@ else:
     print("[pricing] ANTHROPIC_API_KEY not set — Claude fallback disabled.")
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
 PRICING_PATHS = ["/pricing", "/plans", "/pricing-plans"]
-
-PRICE_REGEX = re.compile(r'\$\s*(\d+(?:\.\d{1,2})?)')
+PRICE_REGEX   = re.compile(r'\$\s*(\d+(?:\.\d{1,2})?)')
 
 
 async def fetch_pricing_page(client: httpx.AsyncClient, domain: str) -> tuple[str, str]:
@@ -139,16 +133,13 @@ def detect_currency(text: str) -> str:
     return "USD"
 
 
-# ── Claude fallback ───────────────────────────────────────────────────────────
-
 async def extract_with_claude(text: str) -> tuple[str, list[float], str]:
-    """Use Claude Haiku to extract pricing when heuristics have low confidence.
-    Returns safe defaults if the API key is missing or the call fails."""
+    """Use Claude Haiku to extract pricing when heuristics have low confidence."""
     if anthropic_client is None:
         return "unknown", [], "USD"
 
     try:
-        from anthropic.types import TextBlock  # local import — only reached when client exists
+        from anthropic.types import TextBlock
         prompt = (
             "Extract pricing information from this SaaS pricing page text.\n"
             "Return a JSON object only, no markdown, no explanation, no code fences.\n"
@@ -188,9 +179,7 @@ async def extract_with_claude(text: str) -> tuple[str, list[float], str]:
         return "unknown", [], "USD"
 
 
-# ── Main function ─────────────────────────────────────────────────────────────
-
-async def get_pricing_signal(domain: str) -> dict:
+async def get_pricing_signal(domain: str, force_refresh: bool = False) -> dict:
     normalized_domain = (
         domain.strip()
         .replace("https://", "")
@@ -200,19 +189,19 @@ async def get_pricing_signal(domain: str) -> dict:
     )
 
     cache_key = f"pricing:{CACHE_VERSION}:{normalized_domain}"
-    cached = get_cache(cache_key)
+    cached = get_cache_if_fresh(cache_key, force_refresh=force_refresh)
     if USE_CACHE and cached:
         print(f"[pricing] cache hit: {normalized_domain}")
         return cached
 
     empty_result = {
-        "pricing_model": "unknown",
+        "pricing_model":      "unknown",
         "has_public_pricing": False,
-        "price_points": [],
-        "estimated_acv": 0.0,
-        "currency": "USD",
-        "source_url": "",
-        "confidence": 0.0,
+        "price_points":       [],
+        "estimated_acv":      0.0,
+        "currency":           "USD",
+        "source_url":         "",
+        "confidence":         0.0,
     }
 
     async with httpx.AsyncClient(
@@ -228,7 +217,7 @@ async def get_pricing_signal(domain: str) -> dict:
 
     prices_dom  = extract_prices_from_dom(html)
     prices_text = extract_prices(text)
-    prices = sorted(list(set(prices_dom + prices_text)))[:5]
+    prices      = sorted(list(set(prices_dom + prices_text)))[:5]
 
     model      = detect_pricing_model(text, prices)
     currency   = detect_currency(text)
@@ -249,13 +238,13 @@ async def get_pricing_signal(domain: str) -> dict:
     acv = estimate_acv(model, prices)
 
     result = {
-        "pricing_model":     model,
+        "pricing_model":      model,
         "has_public_pricing": True,
-        "price_points":      prices,
-        "estimated_acv":     acv,
-        "currency":          currency,
-        "source_url":        url,
-        "confidence":        confidence,
+        "price_points":       prices,
+        "estimated_acv":      acv,
+        "currency":           currency,
+        "source_url":         url,
+        "confidence":         confidence,
     }
 
     set_cache(cache_key, result)

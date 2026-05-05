@@ -1,5 +1,6 @@
 import asyncio
 import os
+import math
 from datetime import datetime
 from pydantic import BaseModel
 from fastmcp import FastMCP
@@ -41,7 +42,6 @@ class ContextProtocolAuth(Middleware):
     """
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
-        # health_check is free — pass straight through
         if context.message.params.name == "health_check":
             return await call_next(context)
 
@@ -76,15 +76,15 @@ class RevenueEstimate(BaseModel):
     description=(
         "Estimate the Annual Recurring Revenue (ARR) of a SaaS company "
         "from its domain. Returns a calibrated estimate with confidence "
-        "score and signal breakdown (hiring velocity, pricing model, "
-        "review momentum, traffic rank). Calibrated against S-1 ARR data."
+        "score and signal breakdown (headcount, hiring velocity, pricing "
+        "model, review momentum, traffic rank). Calibrated against S-1 ARR data."
     ),
     meta={
         "surface": "both",
         "queryEligible": True,
-        "latencyClass": "slow",   # live scraping; use "instant" if you always serve cache first
+        "latencyClass": "slow",
         "pricing": {
-            "executeUsd": "0.001",   # required — without this the tool is invisible in Execute mode
+            "executeUsd": "0.001",
         },
         "rateLimit": {
             "maxRequestsPerMinute": 10,
@@ -93,7 +93,7 @@ class RevenueEstimate(BaseModel):
             "supportsBulk": False,
             "notes": (
                 "Results are cached 24 h. "
-                "Fresh fetches (force_refresh=True) take 10–30 s — 4 scrapers run async."
+                "Fresh fetches (force_refresh=True) take 10–30 s — 5 signals run async."
             ),
         },
     },
@@ -108,26 +108,42 @@ async def get_revenue_estimate(
     domain : str
         Company domain to analyse, e.g. 'notion.so' or 'hubspot.com'
     force_refresh : bool
-        If True, bypass the 24-hour cache and fetch fresh signals
+        If True, bypass the 24-hour cache and fetch fresh signals for all sources.
     """
+    # Run all 5 signal fetchers concurrently.
+    # force_refresh is now properly passed through to each one.
     hiring, pricing, reviews, traffic, headcount = await asyncio.gather(
-        get_hiring_signal(domain),
-        get_pricing_signal(domain),
-        get_reviews_signal(domain),
-        get_traffic_signal(domain),
-        get_headcount_signal(domain),
+        get_hiring_signal(domain, force_refresh=force_refresh),
+        get_pricing_signal(domain, force_refresh=force_refresh),
+        get_reviews_signal(domain, force_refresh=force_refresh),
+        get_traffic_signal(domain, force_refresh=force_refresh),
+        get_headcount_signal(domain, force_refresh=force_refresh),
     )
 
+    # Pull Crustdata bonus signals if available (headcount.extra populated by Crustdata)
+    crustdata_extra = headcount.get("extra", {})
+
     # headcount_score: sqrt-normalised to 0-1 (10k employees = max)
-    import math
     hc_raw   = headcount.get("headcount", 0)
     hc_score = min(math.sqrt(hc_raw / 10_000), 1.0) if hc_raw > 0 else 0.0
+
+    # If Crustdata returned job openings and our scraper got 0, use Crustdata's count
+    open_roles = hiring["open_roles"]
+    if open_roles == 0 and crustdata_extra.get("job_openings_count", 0) > 0:
+        open_roles = crustdata_extra["job_openings_count"]
+
+    # If Crustdata returned G2 data and reviews scraper got nothing, use Crustdata's
+    reviews_total = reviews["total_reviews"]
+    reviews_rating = reviews["rating"]
+    if reviews_total == 0 and crustdata_extra.get("g2_reviews", 0) > 0:
+        reviews_total  = crustdata_extra["g2_reviews"]
+        reviews_rating = crustdata_extra.get("g2_rating", 0.0)
 
     signals = {
         "headcount":       hc_raw,
         "headcount_score": hc_score,
         "headcount_conf":  headcount.get("confidence", 0.0),
-        "open_roles":      hiring["open_roles"],
+        "open_roles":      open_roles,
         "velocity_score":  hiring["velocity_score"],
         "acv":             pricing["estimated_acv"],
         "pricing_conf":    pricing["confidence"],
@@ -153,9 +169,10 @@ async def get_revenue_estimate(
                 "confidence": headcount.get("confidence", 0.0),
             },
             "hiring": {
-                "open_roles":     hiring["open_roles"],
-                "velocity_score": hiring["velocity_score"],
-                "source":         hiring["source"],
+                "open_roles":             open_roles,
+                "open_roles_source":      "crustdata" if hiring["open_roles"] == 0 and open_roles > 0 else hiring["source"],
+                "velocity_score":         hiring["velocity_score"],
+                "scraper_source":         hiring["source"],
             },
             "pricing": {
                 "model":         pricing["pricing_model"],
@@ -163,10 +180,11 @@ async def get_revenue_estimate(
                 "confidence":    pricing["confidence"],
             },
             "reviews": {
-                "total_reviews":  reviews["total_reviews"],
-                "rating":         reviews["rating"],
+                "total_reviews":  reviews_total,
+                "rating":         reviews_rating,
                 "momentum_score": reviews["momentum_score"],
                 "source":         reviews["source"],
+                "g2_from_crustdata": crustdata_extra.get("g2_reviews", 0) > 0 and reviews["total_reviews"] == 0,
             },
             "traffic": {
                 "monthly_visits_estimate": traffic["monthly_visits_estimate"],

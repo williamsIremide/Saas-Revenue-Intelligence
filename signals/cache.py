@@ -12,10 +12,10 @@ upstash_url = os.getenv("UPSTASH_REDIS_REST_URL")
 upstash_token = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
 if not upstash_url or not upstash_token:
-    raise ValueError("UPSTASH_REDIS_REST_URL is not set")
+    raise ValueError("UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN must be set")
 
-cache =  Redis(url=upstash_url, token=upstash_token)
-CACHE_TTL = 86400
+cache = Redis(url=upstash_url, token=upstash_token)
+CACHE_TTL = 86400  # 24 hours
 
 
 def get_cache(key: str) -> dict | None:
@@ -27,3 +27,13 @@ def get_cache(key: str) -> dict | None:
 
 def set_cache(key: str, value: dict) -> None:
     cache.setex(key, CACHE_TTL, json.dumps(value))
+
+
+def get_cache_if_fresh(key: str, force_refresh: bool = False) -> dict | None:
+    """
+    Convenience wrapper — returns None if force_refresh=True even when cached.
+    Use this in signal fetchers so force_refresh is honoured consistently.
+    """
+    if force_refresh:
+        return None
+    return get_cache(key)
