@@ -7,17 +7,17 @@ from signals.cache import get_cache_if_fresh, set_cache, USE_CACHE, CACHE_VERSIO
 
 load_dotenv()
 
-SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
-
 _anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 
 if _anthropic_api_key:
-    from anthropic import AsyncAnthropic
-    from anthropic.types import TextBlock
-    anthropic_client = AsyncAnthropic(api_key=_anthropic_api_key)
+    try:
+        from anthropic import AsyncAnthropic
+        from anthropic.types import TextBlock
+        anthropic_client = AsyncAnthropic(api_key=_anthropic_api_key)
+    except Exception:
+        anthropic_client = None
 else:
     anthropic_client = None
-    print("[reviews] ANTHROPIC_API_KEY not set — Claude fallback disabled.")
 
 
 SLUG_OVERRIDES = {
@@ -172,99 +172,134 @@ def extract_sentiment_keywords(text: str) -> float:
 
 
 async def extract_with_claude(text: str) -> tuple[float, int]:
-    """Use Claude Haiku to extract review data when heuristics have low confidence."""
     if anthropic_client is None:
         return 0.0, 0
-
     try:
-        from anthropic.types import TextBlock
         prompt = (
             "Extract review data from this page text.\n"
             "Return JSON only, no markdown, no explanation:\n"
             '{"rating": number, "total_reviews": number}\n\n'
             "Text:\n" + text[:3000]
         )
-
         res = await anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
-
         block = res.content[0]
         if not isinstance(block, TextBlock):
             return 0.0, 0
-
         content = block.text.strip()
         if content.startswith("```"):
             content = content.split("```")[1].strip()
             if content.startswith("json"):
                 content = content[4:].strip()
-
         data = json.loads(content)
         return float(data.get("rating", 0)), int(data.get("total_reviews", 0))
-
     except Exception as e:
         print(f"[reviews] Claude fallback error: {e}")
         return 0.0, 0
 
 
 async def fetch_page(url: str) -> str:
-    providers = []
+    """
+    Race all available scraping providers IN PARALLEL.
+    Hard timeout: 12 seconds per call — fast fail, never blocks the pipeline.
+    """
+    from urllib.parse import quote
 
+    providers = []
     scrapfly_key   = os.getenv("SCRAPFLY_API_KEY")
     scrapedo_key   = os.getenv("SCRAPEDO_API_KEY")
     scraperapi_key = os.getenv("SCRAPER_API_KEY")
 
     if scrapfly_key:
-        from urllib.parse import quote
         encoded = quote(url, safe="")
-        providers.append(("scrapfly", f"https://api.scrapfly.io/scrape?key={scrapfly_key}&url={encoded}&asp=true"))
+        providers.append(("scrapfly",   f"https://api.scrapfly.io/scrape?key={scrapfly_key}&url={encoded}&asp=true"))
     if scrapedo_key:
-        from urllib.parse import quote
         encoded = quote(url, safe="")
-        providers.append(("scrapedo", f"https://api.scrape.do?token={scrapedo_key}&url={encoded}"))
+        providers.append(("scrapedo",   f"https://api.scrape.do?token={scrapedo_key}&url={encoded}"))
     if scraperapi_key:
         providers.append(("scraperapi", f"http://api.scraperapi.com?api_key={scraperapi_key}&url={url}"))
-
     providers.append(("direct", url))
 
-    for name, proxy_url in providers:
-        try:
-            async with httpx.AsyncClient(
-                timeout=45,
-                headers={"User-Agent": "Mozilla/5.0"},
-                follow_redirects=True,
-            ) as provider_client:
-                res = await provider_client.get(proxy_url)
+    async def _try_one(name: str, proxy_url: str) -> tuple[str, str]:
+        timeout = 10 if name != "direct" else 6
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0"},
+            follow_redirects=True,
+        ) as client:
+            res = await client.get(proxy_url)
+            if res.status_code != 200:
+                raise ValueError(f"HTTP {res.status_code}")
+            if name == "scrapfly":
+                data = res.json()
+                sc = data.get("result", {}).get("status_code", 200)
+                if sc != 200:
+                    raise ValueError(f"scrapfly target status {sc}")
+                html = data.get("result", {}).get("content", "")
+            else:
+                html = res.text
+            if not html or len(html) < 5000:
+                raise ValueError(f"too little content ({len(html) if html else 0} bytes)")
+            return name, html
 
-                if res.status_code != 200:
-                    print(f"[reviews/{name}] HTTP {res.status_code}, trying next...")
-                    continue
+    tasks = [asyncio.create_task(_try_one(name, proxy_url)) for name, proxy_url in providers]
 
-                if name == "scrapfly":
-                    try:
-                        data = res.json()
-                        if data.get("result", {}).get("status_code", 200) != 200:
-                            print(f"[reviews/scrapfly] target {data['result']['status_code']}, trying next...")
-                            continue
-                        html = data.get("result", {}).get("content", "")
-                    except Exception as e:
-                        print(f"[reviews/scrapfly] JSON parse error: {e}, trying next...")
-                        continue
-                else:
-                    html = res.text
+    try:
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=12,
+        )
+        # Cancel and fully await losers to prevent "exception never retrieved" noise
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
-                if html and len(html) > 5000:
-                    print(f"[reviews/{name}] success, {len(html)} bytes")
+        for t in done:
+            exc = t.exception()
+            if exc is None:
+                name, html = t.result()
+                print(f"[reviews/{name}] success, {len(html)} bytes")
+                return html
+            # else: this provider failed, try next done task
+
+    except Exception as e:
+        print(f"[reviews] fetch_page error: {e}")
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    return ""
+
+
+async def _fetch_urls_racing(urls: list[str], label: str) -> str:
+    """
+    Try multiple URLs (slug variants) all at once — return first that works.
+    Replaces the sequential for-loop in fetch_g2 / fetch_trustpilot.
+    """
+    tasks = [asyncio.create_task(fetch_page(url)) for url in urls]
+    try:
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=14,
+        )
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        for t in done:
+            if t.exception() is None:
+                html = t.result()
+                if html:
                     return html
-
-                print(f"[reviews/{name}] too little content ({len(html) if html else 0} bytes), trying next...")
-
-        except Exception as e:
-            print(f"[reviews/{name}] error: {e}, trying next...")
-            continue
-
+    except Exception:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     return ""
 
 
@@ -274,35 +309,21 @@ async def fetch_trustpilot(slug: str, domain: str) -> tuple[str, str]:
         f"https://www.trustpilot.com/review/{slug}.com",
         f"https://www.trustpilot.com/review/{slug}.io",
     ]
-    for url in urls:
-        html = await fetch_page(url)
-        if html:
-            return html, "trustpilot"
-    return "", "trustpilot"
+    html = await _fetch_urls_racing(urls, "trustpilot")
+    return html, "trustpilot"
 
 
 async def fetch_g2(slug: str) -> tuple[str, str]:
     primary = SLUG_OVERRIDES.get(slug, slug)
     slugs_to_try = [primary] if primary != slug else [slug, f"{slug}-app", f"{slug}-software"]
-
-    for s in slugs_to_try:
-        url  = f"https://www.g2.com/products/{s}/reviews"
-        html = await fetch_page(url)
-        if html and "reviews" in html.lower():
-            return html, "g2"
+    urls = [f"https://www.g2.com/products/{s}/reviews" for s in slugs_to_try]
+    html = await _fetch_urls_racing(urls, "g2")
+    if html and "reviews" in html.lower():
+        return html, "g2"
     return "", "g2"
 
 
-async def get_reviews_signal(domain: str, force_refresh: bool = False) -> dict:
-    """
-    Parameters
-    ----------
-    domain        : str
-    force_refresh : bool  Bypass Redis cache if True.
-
-    Note: server.py will supplement this with Crustdata G2/Glassdoor data
-    if this returns total_reviews=0. No changes needed here for that path.
-    """
+async def _get_reviews_signal_impl(domain: str, force_refresh: bool = False) -> dict:
     normalized = normalize_domain(domain)
     slug       = extract_slug(domain)
 
@@ -322,6 +343,7 @@ async def get_reviews_signal(domain: str, force_refresh: bool = False) -> dict:
         "confidence":          0.0,
     }
 
+    # Run G2 and Trustpilot fetches concurrently
     tp_task = asyncio.create_task(fetch_trustpilot(slug, normalized))
     g2_task = asyncio.create_task(fetch_g2(slug))
 
@@ -386,3 +408,32 @@ async def get_reviews_signal(domain: str, force_refresh: bool = False) -> dict:
 
     set_cache(cache_key, result)
     return result
+
+
+async def get_reviews_signal(domain: str, force_refresh: bool = False) -> dict:
+    """
+    Public entry point — wraps implementation with a hard 20s timeout.
+    If reviews can't be fetched in time, returns empty gracefully so the
+    other 4 signals still produce a result within the 60s Context Protocol limit.
+    """
+    empty = {
+        "total_reviews":       0,
+        "rating":              0.0,
+        "review_velocity_90d": 0,
+        "sentiment_score":     0.0,
+        "momentum_score":      0.0,
+        "source":              "timeout",
+        "product_slug":        extract_slug(domain),
+        "confidence":          0.0,
+    }
+    try:
+        return await asyncio.wait_for(
+            _get_reviews_signal_impl(domain, force_refresh),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        print(f"[reviews] 20s timeout for {domain} — returning empty")
+        return empty
+    except Exception as e:
+        print(f"[reviews] error for {domain}: {e}")
+        return empty

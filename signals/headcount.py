@@ -89,6 +89,127 @@ def _to_li_slug(domain: str) -> str:
     return d.split(".")[0]
 
 
+def _parse_employee_count_range(ecr: str) -> int:
+    """'5001-10000' → 7500, '10001+' → 12000, '2-10' → 6, '' → 0"""
+    if not ecr:
+        return 0
+    ecr = ecr.strip().replace(",", "")
+    if ecr.endswith("+"):
+        try:
+            return int(ecr[:-1]) + 1000
+        except ValueError:
+            return 0
+    if "-" in ecr:
+        parts = ecr.split("-")
+        try:
+            return (int(parts[0]) + int(parts[1])) // 2
+        except (ValueError, IndexError):
+            return 0
+    try:
+        return int(ecr)
+    except ValueError:
+        return 0
+    
+def _is_own_domain(company_website: str, query_domain: str) -> bool:
+    """
+    Returns True only if company_website points to the ROOT of query_domain —
+    meaning this is actually the company's own website, not a page hosted there.
+ 
+    True:  "https://notion.so"         for query "notion.so"
+    True:  "https://www.notion.so/"    for query "notion.so"
+    True:  "https://hubspot.com"       for query "hubspot.com"
+    False: "https://notion.so/kriss-hkust/..."   ← hosted Notion page
+    False: "https://notion.so/isssues/abc123..."  ← hosted Notion page
+    """
+    if not company_website or not query_domain:
+        return False
+    cw = company_website.lower().replace("https://", "").replace("http://", "").replace("www.", "")
+    q  = query_domain.lower().strip()
+    if not cw.startswith(q):
+        return False
+    remainder = cw[len(q):]
+    # Only accept empty remainder, trailing slash, or query string — no path segments
+    return remainder in ("", "/") or remainder.startswith("?")
+
+# def _score_crustdata_record(rec: dict, query_domain: str) -> float:
+#     """
+#     Score a Crustdata record for how well it matches the queried domain.
+
+#     Returns a float 0.0–3.0. Higher = better match.
+
+#     Rules (in priority order):
+#     1. +2.0 if company_website_domain exactly matches (e.g. "notion.so" == "notion.so")
+#     2. +1.5 if company_website contains the query domain
+#     3. +0.5 if is_full_domain_match is True (Crustdata's own flag)
+#     4. -1.0 penalty if employee_count_range is "1-10" or "11-50" and headcount < 100
+#        (real SaaS companies we'd query have at least a few dozen staff)
+#     5. +0.3 bonus if hq_country is "USA" or "GBR" (most of our training set)
+
+#     The HKUST KRISS false-positive has:
+#       - company_website_domain = "notion.so"  (wrong — it's a hosted Notion page)
+#       - company_website = "https://www.notion.so/kriss-hkust/..."  (not notion.so the company)
+#       - hq_country = "" / hq_state = "Hong Kong"
+#       - employee_count_range = "11-50"
+#       - is_full_domain_match likely False
+
+#     The real Notion record would have:
+#       - company_website = "https://notion.so" or "https://www.notion.so"
+#       - company_website_domain = "notion.so"
+#       - hq_country = "USA"
+#       - employee_count_range = "1001-5000" or similar
+#     """
+#     score   = 0.0
+#     q = query_domain.lower().strip()
+ 
+#     # ── 1. company_website_domain exact match (+2.0) ──────────────────────────
+#     cwd = (rec.get("company_website_domain") or "").lower().strip()
+#     if cwd == q:
+#         score += 2.0
+ 
+#     # ── 2. company_website root-only match (+1.5) ─────────────────────────────
+#     # The website must point to the company's OWN root, not a page hosted there.
+#     # Valid:   "https://notion.so"  or  "https://notion.so/"
+#     # Invalid: "https://notion.so/isssues/abc123..."  ← hosted page
+#     # Invalid: "https://notion.so/kriss-hkust/..."    ← hosted page
+#     cw = (rec.get("company_website") or "").lower()
+#     cw_bare = cw.replace("https://", "").replace("http://", "").replace("www.", "")
+#     if cw_bare.startswith(q):
+#         remainder = cw_bare[len(q):]   # everything after the domain
+#         # Accept only if nothing follows, or just "/" or a query string
+#         remainder_is_root = remainder == "" or remainder == "/" or remainder.startswith("?")
+#         # Reject if remainder contains UUID-like or long hex strings (hosted doc pages)
+#         _UUID_RE = re.compile(r'[0-9a-f]{8,}', re.IGNORECASE)
+#         has_uuid_path = bool(_UUID_RE.search(remainder))
+#         if remainder_is_root and not has_uuid_path:
+#             score += 1.5
+ 
+#     # ── 3. Crustdata's own domain-match flag (+0.5) ───────────────────────────
+#     if rec.get("is_full_domain_match"):
+#         score += 0.5
+ 
+#     # ── 4. Small-org penalty (-1.0) ───────────────────────────────────────────
+#     # Real SaaS companies we'd query have meaningful headcounts.
+#     # Tiny orgs that happen to host pages on a platform domain are false positives.
+#     ecr = (rec.get("employee_count_range") or "").lower()
+#     hc_nested = rec.get("headcount") or {}
+#     hc = 0
+#     if isinstance(hc_nested, dict):
+#         hc = int(hc_nested.get("linkedin_headcount", 0) or 0)
+#     elif isinstance(hc_nested, (int, float)):
+#         hc = int(hc_nested)
+#     if hc == 0:
+#         hc = int(rec.get("employee_count", 0) or 0)
+ 
+#     if ecr in ("1-10", "2-10", "11-50") or (0 < hc < 50):
+#         score -= 1.0
+ 
+#     # ── 5. Geo bonus (+0.3) ───────────────────────────────────────────────────
+#     if (rec.get("hq_country") or "").upper() in ("USA", "GBR", "CAN", "AUS", "DEU", "SGP"):
+#         score += 0.3
+ 
+#     return score
+
+
 # ── Fetchers ──────────────────────────────────────────────────────────────────
 
 async def _fetch_crustdata(client: httpx.AsyncClient, domain: str) -> tuple[int, dict]:
@@ -96,12 +217,15 @@ async def _fetch_crustdata(client: httpx.AsyncClient, domain: str) -> tuple[int,
     Crustdata Company Data API — single call returns headcount, job openings,
     web traffic, G2 reviews, and more.
 
-    Endpoint: GET /screener/company?company_domain={domain}&fields=headcount,job_openings
-    Auth: Token {CRUSTDATA_API_KEY}
+    Key fix: Crustdata can return multiple records for a domain query (e.g. a real
+    SaaS company AND a student club that hosts pages on that domain).  We now pick
+    the best-matching record using _score_crustdata_record() instead of blindly
+    taking records[0].
+
+    Field path fix: headcount data is nested as rec["headcount"]["linkedin_headcount"],
+    NOT rec["headcount"]["headcount"] as previously coded.
 
     Returns (headcount, extra_signals_dict).
-    extra_signals contains job_openings count and web_traffic if available,
-    which the caller can optionally use to enrich other signals.
     """
     if not CRUSTDATA_API_KEY:
         return 0, {}
@@ -118,59 +242,105 @@ async def _fetch_crustdata(client: httpx.AsyncClient, domain: str) -> tuple[int,
             },
             timeout=20,
         )
-        if r.status_code == 200:
-            data = r.json()
-            # Response is a list; take the first match
-            records = data if isinstance(data, list) else data.get("records", [data])
-            if not records:
-                logger.debug(f"[headcount/crustdata] {domain}: no records")
-                return 0, {}
-
-            rec = records[0]
-
-            # Headcount — Crustdata nests this under headcount.headcount or top-level
-            hc = 0
-            hc_field = rec.get("headcount")
-            if isinstance(hc_field, dict):
-                hc = int(hc_field.get("headcount", 0) or 0)
-            elif isinstance(hc_field, (int, float)):
-                hc = int(hc_field)
-            # fallback: employee_count
-            if hc == 0:
-                hc = int(rec.get("employee_count", 0) or 0)
-
-            extra = {}
-
-            # Job openings — bonus signal for hiring.py
-            job_field = rec.get("job_openings")
-            if isinstance(job_field, dict):
-                extra["job_openings_count"] = int(job_field.get("count", 0) or 0)
-            elif isinstance(job_field, (int, float)):
-                extra["job_openings_count"] = int(job_field)
-
-            # G2 / Glassdoor — bonus signal for reviews.py
-            g2 = rec.get("g2") or {}
-            if g2:
-                extra["g2_rating"]      = float(g2.get("rating", 0) or 0)
-                extra["g2_reviews"]     = int(g2.get("reviews_count", 0) or 0)
-
-            glassdoor = rec.get("glassdoor") or {}
-            if glassdoor:
-                extra["glassdoor_rating"] = float(glassdoor.get("rating", 0) or 0)
-                extra["glassdoor_reviews"] = int(glassdoor.get("reviews_count", 0) or 0)
-
-            if hc > 0:
-                logger.debug(f"[headcount/crustdata] {domain}: hc={hc}, extra={extra}")
-                return hc, extra
-            else:
-                logger.debug(f"[headcount/crustdata] {domain}: record found but hc=0, rec={rec}")
-        elif r.status_code == 404:
-            logger.debug(f"[headcount/crustdata] {domain}: not found")
-        else:
-            logger.debug(f"[headcount/crustdata] {domain}: HTTP {r.status_code} — {r.text[:200]}")
+        if r.status_code != 200:
+            logger.debug(f"[headcount/crustdata] {domain}: HTTP {r.status_code}")
+            return 0, {}
+ 
+        data    = r.json()
+        records = data if isinstance(data, list) else data.get("records", [data])
+        if not records:
+            logger.debug(f"[headcount/crustdata] {domain}: no records")
+            return 0, {}
+ 
+        # ── Hard disqualification ──────────────────────────────────────────────
+        valid = []
+        for rec in records:
+            cw  = rec.get("company_website") or ""
+            cwd = (rec.get("company_website_domain") or "").lower().strip()
+ 
+            # company_website_domain must match (Crustdata's own domain tag)
+            if cwd != domain.lower().strip():
+                logger.debug(
+                    f"[headcount/crustdata] {domain}: skip '{rec.get('company_name')}' "
+                    f"— company_website_domain='{cwd}' != query"
+                )
+                continue
+ 
+            # company_website must point to the ROOT, not a hosted sub-page
+            if not _is_own_domain(cw, domain):
+                logger.debug(
+                    f"[headcount/crustdata] {domain}: skip '{rec.get('company_name')}' "
+                    f"— company_website '{cw}' is a hosted sub-page, not own domain"
+                )
+                continue
+ 
+            valid.append(rec)
+ 
+        if not valid:
+            logger.debug(
+                f"[headcount/crustdata] {domain}: {len(records)} record(s) all disqualified "
+                f"(all use {domain} as a hosting platform) → falling through to PDL"
+            )
+            return 0, {}
+ 
+        # Among valid records, pick highest headcount
+        def _hc(rec):
+            hf = rec.get("headcount") or {}
+            if isinstance(hf, dict):
+                return int(hf.get("linkedin_headcount", 0) or 0)
+            return int(hf or 0)
+ 
+        best = max(valid, key=_hc)
+        hc   = _hc(best)
+ 
+        if hc == 0:
+            # Fallback to employee_count_range midpoint
+            ecr = best.get("employee_count_range") or ""
+            hc  = _parse_employee_count_range(ecr)
+ 
+        extra = {}
+ 
+        # job_openings
+        jf = best.get("job_openings") or {}
+        if isinstance(jf, dict):
+            jc = jf.get("job_openings_count") or jf.get("count") or 0
+            if jc:
+                extra["job_openings_count"] = int(jc)
+ 
+        # g2
+        g2 = best.get("g2") or {}
+        if isinstance(g2, dict):
+            rc = g2.get("g2_review_count")
+            rt = g2.get("g2_average_rating")
+            if rc:
+                extra["g2_reviews"] = int(rc)
+                extra["g2_rating"]  = float(rt or 0)
+ 
+        # glassdoor
+        gd = best.get("glassdoor") or {}
+        if isinstance(gd, dict):
+            rc = gd.get("glassdoor_review_count")
+            rt = gd.get("glassdoor_overall_rating")
+            if rc:
+                extra["glassdoor_reviews"] = int(rc)
+                extra["glassdoor_rating"]  = float(rt or 0)
+ 
+        # Crustdata revenue bounds — useful even if headcount is low confidence
+        rev_lo = best.get("estimated_revenue_lower_bound_usd") or 0
+        rev_hi = best.get("estimated_revenue_higher_bound_usd") or 0
+        if rev_lo and rev_hi:
+            extra["crustdata_revenue_low"]  = int(rev_lo)
+            extra["crustdata_revenue_high"] = int(rev_hi)
+ 
+        logger.debug(
+            f"[headcount/crustdata] {domain}: hc={hc} "
+            f"company='{best.get('company_name')}' extra_keys={list(extra.keys())}"
+        )
+        return hc, extra
+ 
     except Exception as e:
         logger.debug(f"[headcount/crustdata] {domain}: {e}")
-    return 0, {}
+        return 0, {}
 
 
 async def _fetch_pdl(client: httpx.AsyncClient, domain: str) -> int:
@@ -256,9 +426,8 @@ async def _fetch_proxycurl(client: httpx.AsyncClient, domain: str) -> int:
 
 async def _fetch_serpapi_google(client: httpx.AsyncClient, domain: str) -> int:
     """
-    Use SERPAPI_API_KEY (not ScraperAPI) to search Google for LinkedIn headcount.
-    SerpApi free tier: 100 searches/month. Much cleaner than ScraperAPI for this.
-    Endpoint: https://serpapi.com/search.json
+    Use SERPAPI_API_KEY to search Google for LinkedIn headcount.
+    SerpApi free tier: 100 searches/month.
     """
     if not SERPAPI_API_KEY:
         return 0
@@ -277,7 +446,6 @@ async def _fetch_serpapi_google(client: httpx.AsyncClient, domain: str) -> int:
         )
         if r.status_code == 200:
             data     = r.json()
-            # Parse organic results snippets
             snippets = " ".join(
                 res.get("snippet", "") for res in data.get("organic_results", [])
             )
@@ -405,7 +573,7 @@ async def get_headcount_signal(domain: str, force_refresh: bool = False) -> dict
         count, extra = await _fetch_crustdata(client, normalized)
         if count > 0:
             source = "crustdata"
-        
+
         if count == 0:
             # 2. PDL
             count = await _fetch_pdl(client, normalized)
@@ -425,7 +593,7 @@ async def get_headcount_signal(domain: str, force_refresh: bool = False) -> dict
                 source = "proxycurl"
 
         if count == 0:
-            # 5. SerpApi — your SERPAPI_API_KEY, much better than ScraperAPI for this
+            # 5. SerpApi
             count = await _fetch_serpapi_google(client, normalized)
             if count > 0:
                 source = "serpapi"

@@ -119,7 +119,7 @@ async def get_jobs(domain: str, force_refresh: bool = False) -> dict:
     slug = normalized_domain.split(".")[0]
 
     async with httpx.AsyncClient(
-        timeout=10,
+        timeout=5,
         headers={"User-Agent": "Mozilla/5.0"},
     ) as client:
         fetchers = [

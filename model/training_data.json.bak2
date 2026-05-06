@@ -72,7 +72,7 @@
     "rank_score": 0.687,
     "traffic_conf": 0.9,
     "tranco_rank": 76,
-    "headcount": 8000,
+    "headcount": 6453,
     "headcount_score": 0.8033,
     "headcount_conf": 0.9
   },
@@ -89,7 +89,7 @@
     "rank_score": 0.458,
     "traffic_conf": 0.9,
     "tranco_rank": 1783,
-    "headcount": 7000,
+    "headcount": 5519,
     "headcount_score": 0.7429,
     "headcount_conf": 0.9
   },
@@ -193,9 +193,9 @@
     "pricing_conf": 0.9,
     "momentum": 0.65,
     "review_conf": 1.0,
-    "rank_score": 0.55,
-    "traffic_conf": 0.9,
-    "tranco_rank": 2000,
+    "rank_score": 0.09,
+    "traffic_conf": 0.6,
+    "tranco_rank": 288600,
     "headcount": 7500
   },
   {
@@ -271,7 +271,7 @@
     "rank_score": 0.567,
     "traffic_conf": 0.9,
     "tranco_rank": 397,
-    "headcount": 5000
+    "headcount": 26
   },
   {
     "company": "Paycom",
@@ -541,7 +541,7 @@
     "rank_score": 0.561,
     "traffic_conf": 0.9,
     "tranco_rank": 431,
-    "headcount": 2200,
+    "headcount": 2620,
     "headcount_score": 0.5119,
     "headcount_conf": 0.9
   },
@@ -588,7 +588,7 @@
     "rank_score": 0.386,
     "traffic_conf": 0.9,
     "tranco_rank": 4829,
-    "headcount": 5000,
+    "headcount": 5201,
     "headcount_score": 0.7212,
     "headcount_conf": 0.9
   },
@@ -978,8 +978,6 @@
     "momentum": 0.42,
     "review_conf": 1.0,
     "rank_score": 0.9,
-    "headcount": 14728,
-    "traffic_conf": 0.9,
-    "tranco_rank": 15
+    "headcount": 14728
   }
 ]

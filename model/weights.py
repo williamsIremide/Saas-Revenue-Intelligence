@@ -1,37 +1,42 @@
 """
 weights.py — ARR estimation model.
 
-Four independent signals
+Architecture change (v2)
 ------------------------
-  open_roles    hiring velocity  (Greenhouse / Lever / Ashby / etc.)
-  momentum      review momentum  (G2 / Trustpilot, bias-corrected)
-  rank_score    Tranco web-traffic rank  (0-1 log scale, INDEPENDENT of hiring)
-  acv           pricing-tier ACV estimate
+Previous: collapse all signals to ONE composite score, then fit log(ARR) = a*log(score) + b
+Problem:  a 500-employee company with $100M ARR looks identical to one with $500M ARR —
+          the composite score can't tell them apart, causing 5-10x errors at the low end.
 
-The previous traffic.py derived rank_score from open_roles, so rank_score
-and open_roles were collinear. With real Tranco data they are independent,
-and the model genuinely has four distinct signal sources.
+New:      Multi-feature Ridge regression directly on log-transformed individual signals.
+          Each signal gets its own coefficient, learned from data.
+          Ridge (L2 regularisation) prevents overfitting on our 60-row dataset.
 
-Regression method
------------------
-We fit:  log(ARR) = a * log(composite_score) + b
+Features (all log-transformed or normalised to 0-1):
+  log_hc         log(headcount + 1)            — scale / revenue capacity
+  log_roles      log(open_roles + 1)            — growth velocity
+  rank_score     Tranco rank score 0-1          — web reach / brand
+  momentum       review momentum 0-1            — customer acquisition
+  acv_norm       min(acv / 10000, 1.0)          — pricing tier
+  hc_x_rank      headcount_score * rank_score   — scale × reach interaction
 
-With only ~20 rows OLS and Huber produce similar results. As the dataset
-grows toward 64+ companies, Huber's robustness matters more because the ARR
-range spans $50M to $35B — a 700x spread where a few mega-companies
-(Salesforce, ServiceNow, Workday) would otherwise dominate the OLS fit.
+Why log-transform headcount and roles?
+  ARR scales roughly as headcount^0.6 (diminishing returns to size).
+  log(hc) captures this naturally; raw hc would make the coefficient
+  meaninglessly small and let large companies dominate.
 
-Outlier strategy
-----------------
-Companies with ARR > ARR_TRAIN_CAP ($6B) are DOWN-WEIGHTED, not excluded.
-Their signals are real and informative; we just don't want them to anchor
-the fit for the $50M–$2B range where most queries will land.
-We implement this by clamping their log(ARR) contribution via Huber loss
-(epsilon=1.35 corresponds to ~1-sigma downweighting at the extremes).
+Training notes
+--------------
+  - Companies with ARR > ARR_TRAIN_CAP are excluded (Salesforce, ServiceNow etc.)
+    They're so far above the query range ($50M–$3B) that even Ridge can't fully
+    compensate for the 700x ARR spread across 65 rows.
+  - Rows with < 2 real signals are excluded.
+  - headcount=0 rows use the fallback composite score path at inference time
+    for backwards compatibility with uncached domains.
 """
 
 import json
 import logging
+import math
 import os
 import pickle
 
@@ -39,15 +44,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
-
-# Companies above this ARR are kept in training but down-weighted by Huber.
-# Salesforce ($35B), ServiceNow ($10B), Workday ($7B), Autodesk ($5.5B) all
-# sit far above the typical query range and would skew an OLS fit.
-ARR_TRAIN_CAP = 6_000_000_000
-
-# Domains to fully exclude from training (no useful signal, skews fit badly).
-EXCLUDE_DOMAINS: set[str] = set()  # previously excluded stripe.com; now handled by Huber
+ARR_TRAIN_CAP   = 5_000_000_000
+EXCLUDE_DOMAINS: set[str] = set()
+MODEL_PATH      = "model/model.pkl"
 
 
 # ── Feature extraction ────────────────────────────────────────────────────────
@@ -56,27 +55,66 @@ def parse_arr(arr_str: str) -> float:
     return float(str(arr_str).replace("_", ""))
 
 
+def _signal_quality(row: dict) -> int:
+    count = 0
+    if float(row.get("headcount",    0)) > 0: count += 1
+    if float(row.get("open_roles",   0)) > 0: count += 1
+    if float(row.get("review_conf",  0)) > 0: count += 1
+    if float(row.get("pricing_conf", 0)) > 0: count += 1
+    if float(row.get("traffic_conf", 0)) > 0: count += 1
+    return count
+
+
+def _row_to_features(row: dict) -> np.ndarray:
+    """
+    Convert a training row or inference signals dict to a feature vector.
+    All features are bounded [0, ~14] so Ridge regularisation is meaningful.
+    """
+    hc         = float(row.get("headcount",       0) or 0)
+    open_roles = float(row.get("open_roles",       0) or 0)
+    rank_score = float(row.get("rank_score",       0) or 0)
+    momentum   = float(row.get("momentum",         0) or 0)
+    acv        = float(row.get("acv",              0) or 0)
+
+    # headcount_score for interaction term (sqrt-normalised, 10k=1.0)
+    hc_score   = min(math.sqrt(hc / 10_000), 1.0) if hc > 0 else 0.0
+
+    log_hc     = math.log(hc + 1)
+    log_roles  = math.log(open_roles + 1)
+    acv_norm   = min(acv / 10_000, 1.0)
+    hc_x_rank  = hc_score * rank_score  # interaction
+
+    return np.array([
+        log_hc,       # 0 — headcount (log scale)
+        log_roles,    # 1 — open roles (log scale)
+        rank_score,   # 2 — web traffic rank
+        momentum,     # 3 — review momentum
+        acv_norm,     # 4 — pricing tier
+        hc_x_rank,    # 5 — headcount × traffic interaction
+    ])
+
+
+def signals_to_features(signals: dict) -> np.ndarray:
+    """
+    Inference path: convert live signal dict to feature vector.
+    Handles both training-row keys and server.py signal keys.
+    """
+    # server.py passes headcount_score separately; training rows have raw headcount
+    hc = float(signals.get("headcount", 0) or 0)
+    if hc == 0:
+        # Reconstruct from headcount_score if available
+        hs = float(signals.get("headcount_score", 0) or 0)
+        hc = (hs ** 2) * 10_000  # invert sqrt normalisation
+
+    return _row_to_features({**signals, "headcount": hc})
+
+
+# ── Legacy composite score (inference fallback when headcount=0) ──────────────
+
 def compute_weighted_score(signals: dict) -> float:
     """
-    Compute a 0-1 composite score from all five signals.
-
-    Signal hierarchy
-    ----------------
-    headcount_score  0.40  PRIMARY — total LinkedIn employees, sqrt-scaled.
-                           Correlation with log(ARR): ~0.85 vs 0.33 for open_roles.
-                           A company with 5,000 staff has more revenue capacity
-                           than one with 500, regardless of current hiring pace.
-    rank_score       0.20  Web traffic (Tranco) — independent of hiring.
-    momentum         0.15  Review growth — customer acquisition proxy.
-    open_roles       0.10  SECONDARY — current hiring velocity / growth signal.
-                           Kept because it captures forward-looking growth
-                           that headcount (a lagging indicator) misses.
-    acv_signal       0.10  Pricing tier ACV estimate.
-    hc_x_rank        0.05  headcount × rank interaction: scale × web reach.
-
-    Fallback: if headcount_score=0 (LinkedIn not scraped yet), the model
-    degrades gracefully to the old open_roles-primary weights so existing
-    cached rows without headcount still produce reasonable estimates.
+    Kept for backwards compatibility — used only when headcount=0 AND
+    the multi-feature model is unavailable.
     """
     hc_score   = float(signals.get("headcount_score", 0.0))
     open_roles = float(signals.get("open_roles",      0))
@@ -84,14 +122,13 @@ def compute_weighted_score(signals: dict) -> float:
     rank_score = float(signals.get("rank_score",      0.0))
     acv        = float(signals.get("acv",             0.0))
 
-    acv_norm    = min(acv / 10_000, 1.0)
-    roles_norm  = min((open_roles / 500) ** 0.6, 1.0)
-    hc_x_rank   = min((hc_score * rank_score) / 0.2, 1.0)  # normalise: 0.2 ≈ typical product
+    acv_norm   = min(acv / 10_000, 1.0)
+    roles_norm = min((open_roles / 500) ** 0.6, 1.0)
+    hc_x_rank  = min((hc_score * rank_score) / 0.2, 1.0)
 
     if hc_score > 0:
-        # Full 5-signal model
         return (
-            hc_score  * 0.40 +
+            hc_score   * 0.40 +
             rank_score * 0.20 +
             momentum   * 0.15 +
             roles_norm * 0.10 +
@@ -99,8 +136,6 @@ def compute_weighted_score(signals: dict) -> float:
             hc_x_rank  * 0.05
         )
     else:
-        # Fallback: headcount unavailable — use open_roles-primary weights
-        # (same as previous model, slightly degraded accuracy)
         size_mult   = 1.30 if open_roles >= 200 else 1.0
         interaction = min((open_roles * rank_score) / 200, 1.0)
         base = (
@@ -115,47 +150,27 @@ def compute_weighted_score(signals: dict) -> float:
 
 # ── Training ──────────────────────────────────────────────────────────────────
 
-def _signal_quality(row: dict) -> int:
-    """
-    Count how many of the 5 signals returned real data (not zero-due-to-failure).
-    """
-    count = 0
-    if float(row.get("headcount",  0)) > 0:      count += 1
-    if float(row.get("open_roles", 0)) > 0:      count += 1
-    if float(row.get("review_conf", 0)) > 0:     count += 1
-    if float(row.get("pricing_conf", 0)) > 0:    count += 1
-    if float(row.get("traffic_conf", 0)) > 0:    count += 1
-    return count
-
-
 def train_model(
     training_data_path: str = "model/training_data.json",
     min_signals: int = 2,
 ) -> None:
     """
-    Fit log(ARR) = a * log(composite_score) + b using Huber regression.
+    Fit multi-feature Ridge regression: log(ARR) ~ features.
 
-    Only trains on rows with at least `min_signals` real data sources.
-    A signal is "real" when its confidence > 0 (not a scrape failure).
-    This prevents rows where G2/Trustpilot returned 403 from poisoning
-    the fit with fake momentum=0 values.
-
-    ARR cap: companies above ARR_TRAIN_CAP are excluded from training.
-    Salesforce ($35B), ServiceNow ($10B) etc. sit so far above the typical
-    query range ($50M–$3B) that they dominate the OLS/Huber fit and push
-    all mid-range predictions toward the mean. They're excluded, not
-    down-weighted, because even Huber can't fully compensate for a 700x
-    outlier when n=65.
+    Uses RidgeCV to auto-select the regularisation strength alpha from
+    [0.01, 0.1, 1, 10, 100] via leave-one-out cross-validation.
     """
-    ARR_TRAIN_CAP = 5_000_000_000
+    try:
+        from sklearn.linear_model import RidgeCV
+        from sklearn.preprocessing import StandardScaler
+    except ImportError:
+        print("scikit-learn not found. Run: pip install scikit-learn")
+        raise
 
     with open(training_data_path) as f:
         data = json.load(f)
 
-    filtered = []
-    excluded_zero  = 0
-    excluded_cap   = 0
-    excluded_sig   = 0
+    filtered, excluded_cap, excluded_sig, excluded_zero = [], 0, 0, 0
 
     for row in data:
         if row["domain"] in EXCLUDE_DOMAINS:
@@ -169,7 +184,9 @@ def train_model(
         if sq < min_signals:
             excluded_sig += 1
             continue
-        if row.get("open_roles", 0) == 0 and row.get("momentum", 0) == 0 and row.get("rank_score", 0) == 0:
+        if (row.get("open_roles", 0) == 0
+                and row.get("momentum", 0) == 0
+                and row.get("rank_score", 0) == 0):
             excluded_zero += 1
             continue
         filtered.append(row)
@@ -177,114 +194,104 @@ def train_model(
     print(
         f"Training on {len(filtered)}/{len(data)} companies  "
         f"(excluded: {excluded_cap} ARR>{ARR_TRAIN_CAP/1e9:.0f}B, "
-        f"{excluded_sig} <{min_signals} signals, "
-        f"{excluded_zero} all-zero)"
+        f"{excluded_sig} <{min_signals} signals, {excluded_zero} all-zero)"
     )
 
-    try:
-        from sklearn.linear_model import HuberRegressor
-    except ImportError:
-        logger.warning("[weights] scikit-learn not found; falling back to OLS.")
-        HuberRegressor = None  # type: ignore
+    X = np.array([_row_to_features(row) for row in filtered])
+    y = np.array([math.log(parse_arr(row["arr"])) for row in filtered])
 
-    scores = np.array([compute_weighted_score(row) for row in filtered])
-    arrs   = np.array([parse_arr(row["arr"])        for row in filtered])
-    scores = np.clip(scores, 1e-6, None)
+    # Standardise features so Ridge penalty is applied fairly across all features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-    log_scores = np.log(scores).reshape(-1, 1)
-    log_arrs   = np.log(arrs)
+    # RidgeCV: tries multiple alpha values, picks best via leave-one-out CV
+    alphas = [0.01, 0.1, 1.0, 10.0, 100.0, 500.0]
+    model  = RidgeCV(alphas=alphas, fit_intercept=True, cv=None)  # cv=None → LOO
+    model.fit(X_scaled, y)
 
-    if HuberRegressor is not None:
-        # epsilon=1.35: rows > 1.35 * MAD are treated as outliers.
-        # Larger epsilon -> closer to OLS. 1.35 is the standard "95% efficiency" setting.
-        model = HuberRegressor(epsilon=1.35, max_iter=500, fit_intercept=True)
-        model.fit(log_scores, log_arrs)
-        a = float(model.coef_[0])
-        b = float(model.intercept_)
-        method = "Huber"
-    else:
-        # OLS fallback
-        A = np.column_stack([log_scores.ravel(), np.ones(len(filtered))])
-        coeffs, _, _, _ = np.linalg.lstsq(A, log_arrs, rcond=None)
-        a, b = float(coeffs[0]), float(coeffs[1])
-        method = "OLS (fallback)"
-
-    print(f"  Method:             {method}")
-    print(f"  Scale exponent (a): {a:.4f}")
-    print(f"  Intercept (b):      {b:.4f}")
+    print(f"  Method:     RidgeCV (alpha={model.alpha_:.3f})")
+    print(f"  Intercept:  {model.intercept_:.4f}")
+    feature_names = ["log_hc", "log_roles", "rank_score", "momentum", "acv_norm", "hc_x_rank"]
+    for name, coef in zip(feature_names, model.coef_):
+        print(f"  {name:<14} coef={coef:+.4f}")
 
     os.makedirs("model", exist_ok=True)
-    with open("model/model.pkl", "wb") as f:
-        pickle.dump({"a": a, "b": b, "method": method}, f)
+    with open(MODEL_PATH, "wb") as f:
+        pickle.dump({"model": model, "scaler": scaler, "version": 2}, f)
 
-    # Sanity check
-    _print_sanity_check(filtered, scores, a, b)
-    print("Model saved -> model/model.pkl")
+    _print_sanity_check(filtered, X_scaled, model)
+    print(f"Model saved -> {MODEL_PATH}")
 
 
-def _print_sanity_check(
-    rows: list[dict],
-    scores: np.ndarray,
-    a: float,
-    b: float,
-) -> None:
+def _print_sanity_check(rows, X_scaled, model) -> None:
     print("\nSanity check (flag = >3x error):")
     errors = []
-    for row, score in zip(rows, scores):
-        predicted = np.exp(a * np.log(score) + b)
+    preds  = model.predict(X_scaled)
+    for row, log_pred in zip(rows, preds):
+        predicted = math.exp(log_pred)
         actual    = parse_arr(row["arr"])
         ratio     = predicted / actual if actual > 0 else 0.0
-        errors.append(abs(np.log(max(ratio, 1e-6))))
+        errors.append(abs(math.log(max(ratio, 1e-6))))
         flag = "⚠ " if (ratio < 0.33 or ratio > 3.0) else "  "
         print(
-            f"  {flag}{row['company']:<16}  "
+            f"  {flag}{row.get('company', row['domain']):<18}  "
             f"actual: ${actual/1e6:>8.0f}M  "
             f"predicted: ${predicted/1e6:>8.0f}M  "
             f"ratio: {ratio:.2f}x"
         )
     mae = float(np.mean(errors))
-    print(f"\nMean log error: {mae:.3f}  ({np.exp(mae):.2f}x average error)")
+    print(f"\nMean log error: {mae:.3f}  ({math.exp(mae):.2f}x average error)")
 
 
 # ── Inference ─────────────────────────────────────────────────────────────────
 
 def load_model() -> dict:
-    with open("model/model.pkl", "rb") as f:
+    with open(MODEL_PATH, "rb") as f:
         return pickle.load(f)
 
 
 def predict_arr(signals: dict) -> dict:
     """
-    Return an ARR point estimate with a confidence interval.
+    Return an ARR point estimate with confidence interval.
 
-    Confidence is derived from four independent signal quality indicators:
-      - hiring:  open_roles > 0  (hiring board found)
-      - reviews: review_conf from G2/Trustpilot scrape
-      - pricing: pricing_conf from pricing page scrape
-      - traffic: traffic_conf from Tranco lookup (0 if domain not in top-1M)
-
-    The margin shrinks as confidence rises: 40% at zero confidence, 20% at full.
-    A low-confidence estimate will therefore show a wider range as a natural
-    signal to the caller that the data is thin.
+    For model v2 (multi-feature Ridge): uses per-feature regression.
+    For model v1 (legacy single-score): falls back to old composite path.
     """
     params = load_model()
-    a, b   = params["a"], params["b"]
 
-    score    = max(compute_weighted_score(signals), 1e-6)
-    log_pred = a * np.log(score) + b
-    point    = float(np.exp(log_pred))
+    if params.get("version", 1) == 2:
+        # ── v2: multi-feature Ridge ───────────────────────────────────────────
+        model  = params["model"]
+        scaler = params["scaler"]
 
-    # Five independent confidence factors
+        feats  = signals_to_features(signals).reshape(1, -1)
+        feats_scaled = scaler.transform(feats)
+        log_pred = float(model.predict(feats_scaled)[0])
+        point    = math.exp(log_pred)
+
+    else:
+        # ── v1 fallback (old model.pkl format) ────────────────────────────────
+        a, b  = params["a"], params["b"]
+        score = max(compute_weighted_score(signals), 1e-6)
+        point = math.exp(a * math.log(score) + b)
+
+    # ── Confidence interval ───────────────────────────────────────────────────
     confidence_factors = [
-        float(signals.get("headcount_conf", 0.0)),   # LinkedIn headcount found
-        1.0 if signals.get("open_roles", 0) > 0 else 0.0,
+        float(signals.get("headcount_conf", 0.0)),
+        1.0 if float(signals.get("open_roles", 0)) > 0 else 0.0,
         float(signals.get("review_conf",  0.0)),
         float(signals.get("pricing_conf", 0.0)),
         float(signals.get("traffic_conf", 0.0)),
     ]
     avg_conf = sum(confidence_factors) / len(confidence_factors)
 
-    margin = 0.40 - (avg_conf * 0.20)   # 0.40 at zero conf -> 0.20 at full conf
+    # Wider interval when headcount is missing (primary signal absent)
+    hc = float(signals.get("headcount", 0) or 0)
+    if hc == 0:
+        hs = float(signals.get("headcount_score", 0) or 0)
+        hc = (hs ** 2) * 10_000
+    base_margin = 0.50 if hc < 50 else 0.40
+    margin = base_margin - (avg_conf * 0.20)
 
     return {
         "arr_estimate":     round(point),
@@ -304,18 +311,17 @@ def predict_arr(signals: dict) -> dict:
 if __name__ == "__main__":
     train_model()
 
-    print("\n--- predict_arr smoke test (Notion) ---")
-    result = predict_arr({
-        "open_roles":   141,
-        "momentum":     0.93,
-        "rank_score":   0.349,   # real Tranco score for notion.so
-        "acv":          480.0,
-        "review_conf":  1.0,
-        "pricing_conf": 1.0,
-        "traffic_conf": 0.9,
-    })
-    print(
-        f"Estimate:  ${result['arr_estimate']/1e6:.0f}M  "
-        f"(${result['range_low']/1e6:.0f}M — ${result['range_high']/1e6:.0f}M)  "
-        f"{result['confidence_label']} ({result['confidence_score']})"
-    )
+    print("\n--- predict_arr smoke tests ---")
+    tests = [
+        ("Notion (~$330M)",  {"headcount": 3000, "open_roles": 144, "momentum": 0.41, "rank_score": 0.495, "acv": 480,  "headcount_score": 0.548, "review_conf": 0.7, "pricing_conf": 1.0, "traffic_conf": 0.9, "headcount_conf": 0.92}),
+        ("HubSpot (~$2.2B)", {"headcount": 11965,"open_roles": 0,   "momentum": 0.97, "rank_score": 0.599, "acv": 0,    "headcount_score": 1.0,   "review_conf": 1.0, "pricing_conf": 0.2, "traffic_conf": 0.9, "headcount_conf": 0.92}),
+        ("Linear (~$50M)",   {"headcount": 200,  "open_roles": 23,  "momentum": 0.41, "rank_score": 0.326, "acv": 1560, "headcount_score": 0.141, "review_conf": 0.7, "pricing_conf": 1.0, "traffic_conf": 0.75,"headcount_conf": 0.92}),
+        ("Calendly (~$100M)",{"headcount": 500,  "open_roles": 21,  "momentum": 0.59, "rank_score": 0.566, "acv": 300,  "headcount_score": 0.224, "review_conf": 0.7, "pricing_conf": 1.0, "traffic_conf": 0.9, "headcount_conf": 0.92}),
+        ("Vanta (~$100M)",   {"headcount": 500,  "open_roles": 150, "momentum": 0.40, "rank_score": 0.285, "acv": 0,    "headcount_score": 0.224, "review_conf": 0.7, "pricing_conf": 0.2, "traffic_conf": 0.75,"headcount_conf": 0.92}),
+    ]
+    for label, sigs in tests:
+        r = predict_arr(sigs)
+        print(
+            f"  {label:<22}  ${r['arr_estimate']/1e6:>6.0f}M  "
+            f"({r['confidence_label']}, {r['confidence_score']:.2f})"
+        )

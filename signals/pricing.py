@@ -205,7 +205,7 @@ async def get_pricing_signal(domain: str, force_refresh: bool = False) -> dict:
     }
 
     async with httpx.AsyncClient(
-        timeout=10,
+        timeout=6,
         headers={"User-Agent": "Mozilla/5.0"},
         follow_redirects=True,
     ) as client:
