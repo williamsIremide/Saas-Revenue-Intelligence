@@ -2,6 +2,6 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "/app/.venv/bin/python server.py"
+startCommand = "python server.py"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
