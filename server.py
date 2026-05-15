@@ -1,4 +1,4 @@
-import asyncio
+import asyncio, uvicorn
 import os
 import math
 from datetime import datetime
@@ -7,6 +7,9 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.exceptions import ToolError
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 from dotenv import load_dotenv
 
 from ctxprotocol import verify_context_request, ContextError
@@ -30,8 +33,6 @@ if not os.path.exists(_MODEL_PATH):
 mcp = FastMCP("saas-revenue-intelligence")
 
 # ── Per-signal timeouts (seconds) ─────────────────────────────────────────────
-# Each signal gets its own budget. Reviews is the slowest scraper so gets most.
-# Headcount/hiring/pricing/traffic are fast APIs or cached — 15s is generous.
 _TIMEOUTS = {
     "hiring":    12,
     "pricing":   20,
@@ -48,7 +49,6 @@ _EMPTY_HEADCOUNT = {"headcount": 0, "headcount_score": 0.0, "source": "none", "c
 
 
 async def _with_timeout(coro, timeout: int, empty: dict, label: str) -> dict:
-    """Run a signal coroutine with a hard timeout, returning empty dict on failure."""
     try:
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
@@ -59,10 +59,16 @@ async def _with_timeout(coro, timeout: int, empty: dict, label: str) -> dict:
         return empty
 
 
+# ── Plain HTTP health endpoint (no auth, no MCP) ──────────────────────────────
+# Railway hits GET /health to check container liveness.
+# This bypasses FastMCP and the auth middleware entirely.
+async def _http_health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok", "server": "saas-revenue-intelligence"})
+
+
+# ── Auth middleware ────────────────────────────────────────────────────────────
 class ContextProtocolAuth(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next):
-        if context.message.params.name == "health_check":
-            return await call_next(context)
         headers = get_http_headers()
         auth_header = headers.get("authorization", "")
         try:
@@ -77,6 +83,7 @@ class ContextProtocolAuth(Middleware):
 mcp.add_middleware(ContextProtocolAuth())
 
 
+# ── Response models ────────────────────────────────────────────────────────────
 class RevenueEstimate(BaseModel):
     arr_estimate:     float
     range_low:        float
@@ -86,6 +93,8 @@ class RevenueEstimate(BaseModel):
     signal_breakdown: dict
     fetched_at:       str
 
+
+# ── MCP tools ──────────────────────────────────────────────────────────────────
 
 @mcp.tool(
     description=(
@@ -125,8 +134,6 @@ async def get_revenue_estimate(
     force_refresh : bool
         If True, bypass the 24-hour cache and fetch fresh signals for all sources.
     """
-    # Run all 5 signals concurrently, each with its own hard timeout.
-    # asyncio.gather runs them in parallel — total wall time = slowest signal, not sum.
     hiring, pricing, reviews, traffic, headcount = await asyncio.gather(
         _with_timeout(get_hiring_signal(domain,    force_refresh=force_refresh), _TIMEOUTS["hiring"],    _EMPTY_HIRING,    "hiring"),
         _with_timeout(get_pricing_signal(domain,   force_refresh=force_refresh), _TIMEOUTS["pricing"],   _EMPTY_PRICING,   "pricing"),
@@ -209,13 +216,10 @@ async def get_revenue_estimate(
     )
 
 
-@mcp.tool(description="Returns server health status. Free diagnostic endpoint.")
-def health_check() -> dict:
-    return {"status": "ok", "server": "saas-revenue-intelligence"}
-
-
+# ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    mcp.run(
-        transport="http",
-        port=int(os.getenv("PORT", 3000)),
-    )
+    # Mount /health as a plain HTTP route on the FastMCP ASGI app
+    app = mcp.http_app()
+    app.add_route("/health", _http_health, methods=["GET"])
+
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
