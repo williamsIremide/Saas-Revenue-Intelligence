@@ -2,7 +2,7 @@ import asyncio, uvicorn
 import os
 import math
 from datetime import datetime
-from typing import Any
+from pydantic import BaseModel
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_http_headers
@@ -58,12 +58,10 @@ async def _with_timeout(coro, timeout: int, empty: dict, label: str) -> dict:
         return empty
 
 
-# ── Health endpoint ────────────────────────────────────────────────────────────
 async def _http_health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "saas-revenue-intelligence"})
 
 
-# ── Auth middleware ────────────────────────────────────────────────────────────
 class ContextProtocolAuth(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         headers = get_http_headers()
@@ -80,37 +78,53 @@ class ContextProtocolAuth(Middleware):
 mcp.add_middleware(ContextProtocolAuth())
 
 
-# ── Explicit outputSchema passed directly to the decorator ─────────────────────
-# FastMCP 2.10+ accepts output_schema= as a decorator param.
-# This bypasses the _WrappedResult wrapper that causes Context Protocol's
-# "root must be object" validation failure.
-_OUTPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "arr_estimate":     {"type": "number", "description": "Calibrated ARR point estimate in USD"},
-        "range_low":        {"type": "number", "description": "Low end of confidence range in USD"},
-        "range_high":       {"type": "number", "description": "High end of confidence range in USD"},
-        "confidence_score": {"type": "number", "description": "Signal confidence 0.0-1.0"},
-        "confidence_label": {"type": "string",  "enum": ["Low", "Medium", "High"]},
-        "signal_breakdown": {
-            "type": "object",
-            "description": "Per-signal data used to generate the estimate",
-            "properties": {
-                "headcount": {"type": "object"},
-                "hiring":    {"type": "object"},
-                "pricing":   {"type": "object"},
-                "reviews":   {"type": "object"},
-                "traffic":   {"type": "object"},
-            },
-        },
-        "fetched_at": {"type": "string", "description": "ISO 8601 timestamp"},
-    },
-    "required": [
-        "arr_estimate", "range_low", "range_high",
-        "confidence_score", "confidence_label",
-        "signal_breakdown", "fetched_at",
-    ],
-}
+# ── Nested signal models (gives Context Protocol richer outputSchema) ──────────
+class HeadcountSignal(BaseModel):
+    total:      int
+    size_tier:  str
+    source:     str
+    confidence: float
+
+class HiringSignal(BaseModel):
+    open_roles:        int
+    open_roles_source: str
+    velocity_score:    float
+    scraper_source:    str
+
+class PricingSignal(BaseModel):
+    model:         str
+    estimated_acv: float
+    confidence:    float
+
+class ReviewsSignal(BaseModel):
+    total_reviews:     int
+    rating:            float
+    momentum_score:    float
+    source:            str
+    g2_from_crustdata: bool
+
+class TrafficSignal(BaseModel):
+    monthly_visits_estimate: int
+    rank:                    int
+    rank_score:              float
+    source:                  str
+    confidence:              float
+
+class SignalBreakdown(BaseModel):
+    headcount: HeadcountSignal
+    hiring:    HiringSignal
+    pricing:   PricingSignal
+    reviews:   ReviewsSignal
+    traffic:   TrafficSignal
+
+class RevenueEstimate(BaseModel):
+    arr_estimate:     float
+    range_low:        float
+    range_high:       float
+    confidence_score: float
+    confidence_label: str
+    signal_breakdown: SignalBreakdown
+    fetched_at:       str
 
 
 @mcp.tool(
@@ -118,10 +132,8 @@ _OUTPUT_SCHEMA = {
         "Estimate the Annual Recurring Revenue (ARR) of a SaaS company "
         "from its domain. Returns a calibrated estimate with confidence "
         "score and signal breakdown (headcount, hiring velocity, pricing "
-        "model, review momentum, traffic rank). Calibrated against S-1 ARR data. "
-        "Results cached 24h — fresh fetches take 10–30s."
+        "model, review momentum, traffic rank). Calibrated against S-1 ARR data."
     ),
-    output_schema=_OUTPUT_SCHEMA,
     meta={
         "surface": "both",
         "queryEligible": True,
@@ -132,14 +144,14 @@ _OUTPUT_SCHEMA = {
             "cooldownMs": 2000,
             "maxConcurrency": 2,
             "supportsBulk": False,
-            "notes": "Results cached 24h. Fresh fetches (force_refresh=True) take 10-30s.",
+            "notes": "Results are cached 24h. Fresh fetches take 10–30s.",
         },
     },
 )
 async def get_revenue_estimate(
     domain: str,
     force_refresh: bool = False,
-) -> dict[str, Any]:
+) -> RevenueEstimate:
     """
     Parameters
     ----------
@@ -187,50 +199,49 @@ async def get_revenue_estimate(
 
     estimate = predict_arr(signals)
 
-    return {
-        "arr_estimate":     float(estimate["arr_estimate"]),
-        "range_low":        float(estimate["range_low"]),
-        "range_high":       float(estimate["range_high"]),
-        "confidence_score": float(estimate["confidence_score"]),
-        "confidence_label": str(estimate["confidence_label"]),
-        "signal_breakdown": {
-            "headcount": {
-                "total":      hc_raw,
-                "size_tier":  headcount.get("size_tier", "unknown"),
-                "source":     headcount.get("source", "none"),
-                "confidence": headcount.get("confidence", 0.0),
-            },
-            "hiring": {
-                "open_roles":        open_roles,
-                "open_roles_source": "crustdata" if hiring["open_roles"] == 0 and open_roles > 0 else hiring["source"],
-                "velocity_score":    hiring["velocity_score"],
-                "scraper_source":    hiring["source"],
-            },
-            "pricing": {
-                "model":         pricing["pricing_model"],
-                "estimated_acv": pricing["estimated_acv"],
-                "confidence":    pricing["confidence"],
-            },
-            "reviews": {
-                "total_reviews":     reviews_total,
-                "rating":            reviews_rating,
-                "momentum_score":    reviews["momentum_score"],
-                "source":            reviews["source"],
-                "g2_from_crustdata": crustdata_extra.get("g2_reviews", 0) > 0 and reviews["total_reviews"] == 0,
-            },
-            "traffic": {
-                "monthly_visits_estimate": traffic["monthly_visits_estimate"],
-                "rank":                    traffic["rank"],
-                "rank_score":              traffic["rank_score"],
-                "source":                  traffic["source"],
-                "confidence":              traffic["confidence"],
-            },
-        },
-        "fetched_at": datetime.utcnow().isoformat(),
-    }
+    return RevenueEstimate(
+        arr_estimate=estimate["arr_estimate"],
+        range_low=estimate["range_low"],
+        range_high=estimate["range_high"],
+        confidence_score=estimate["confidence_score"],
+        confidence_label=estimate["confidence_label"],
+        signal_breakdown=SignalBreakdown(
+            headcount=HeadcountSignal(
+                total=hc_raw,
+                size_tier=headcount.get("size_tier", "unknown"),
+                source=headcount.get("source", "none"),
+                confidence=headcount.get("confidence", 0.0),
+            ),
+            hiring=HiringSignal(
+                open_roles=open_roles,
+                open_roles_source="crustdata" if hiring["open_roles"] == 0 and open_roles > 0 else hiring["source"],
+                velocity_score=hiring["velocity_score"],
+                scraper_source=hiring["source"],
+            ),
+            pricing=PricingSignal(
+                model=pricing["pricing_model"],
+                estimated_acv=pricing["estimated_acv"],
+                confidence=pricing["confidence"],
+            ),
+            reviews=ReviewsSignal(
+                total_reviews=reviews_total,
+                rating=reviews_rating,
+                momentum_score=reviews["momentum_score"],
+                source=reviews["source"],
+                g2_from_crustdata=crustdata_extra.get("g2_reviews", 0) > 0 and reviews["total_reviews"] == 0,
+            ),
+            traffic=TrafficSignal(
+                monthly_visits_estimate=traffic["monthly_visits_estimate"],
+                rank=traffic["rank"],
+                rank_score=traffic["rank_score"],
+                source=traffic["source"],
+                confidence=traffic["confidence"],
+            ),
+        ),
+        fetched_at=datetime.utcnow().isoformat(),
+    )
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app = mcp.http_app()
     app.add_route("/health", _http_health, methods=["GET"])
