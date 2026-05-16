@@ -2,13 +2,13 @@ import asyncio, uvicorn
 import os
 import math
 from datetime import datetime
+from typing import Any
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.exceptions import ToolError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.routing import Route
 from dotenv import load_dotenv
 
 from ctxprotocol import verify_context_request, ContextError
@@ -58,7 +58,7 @@ async def _with_timeout(coro, timeout: int, empty: dict, label: str) -> dict:
         return empty
 
 
-# ── Plain HTTP health endpoint ─────────────────────────────────────────────────
+# ── Health endpoint ────────────────────────────────────────────────────────────
 async def _http_health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "saas-revenue-intelligence"})
 
@@ -80,15 +80,18 @@ class ContextProtocolAuth(Middleware):
 mcp.add_middleware(ContextProtocolAuth())
 
 
-# ── Explicit outputSchema (plain object — passes Context Protocol validation) ──
+# ── Explicit outputSchema passed directly to the decorator ─────────────────────
+# FastMCP 2.10+ accepts output_schema= as a decorator param.
+# This bypasses the _WrappedResult wrapper that causes Context Protocol's
+# "root must be object" validation failure.
 _OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
         "arr_estimate":     {"type": "number", "description": "Calibrated ARR point estimate in USD"},
         "range_low":        {"type": "number", "description": "Low end of confidence range in USD"},
         "range_high":       {"type": "number", "description": "High end of confidence range in USD"},
-        "confidence_score": {"type": "number", "description": "Signal confidence 0.0–1.0"},
-        "confidence_label": {"type": "string", "enum": ["Low", "Medium", "High"]},
+        "confidence_score": {"type": "number", "description": "Signal confidence 0.0-1.0"},
+        "confidence_label": {"type": "string",  "enum": ["Low", "Medium", "High"]},
         "signal_breakdown": {
             "type": "object",
             "description": "Per-signal data used to generate the estimate",
@@ -100,13 +103,16 @@ _OUTPUT_SCHEMA = {
                 "traffic":   {"type": "object"},
             },
         },
-        "fetched_at": {"type": "string", "description": "ISO 8601 timestamp of when signals were fetched"},
+        "fetched_at": {"type": "string", "description": "ISO 8601 timestamp"},
     },
-    "required": ["arr_estimate", "range_low", "range_high", "confidence_score", "confidence_label", "signal_breakdown", "fetched_at"],
+    "required": [
+        "arr_estimate", "range_low", "range_high",
+        "confidence_score", "confidence_label",
+        "signal_breakdown", "fetched_at",
+    ],
 }
 
 
-# ── MCP tool — returns plain dict, not Pydantic model ─────────────────────────
 @mcp.tool(
     description=(
         "Estimate the Annual Recurring Revenue (ARR) of a SaaS company "
@@ -115,27 +121,25 @@ _OUTPUT_SCHEMA = {
         "model, review momentum, traffic rank). Calibrated against S-1 ARR data. "
         "Results cached 24h — fresh fetches take 10–30s."
     ),
+    output_schema=_OUTPUT_SCHEMA,
     meta={
         "surface": "both",
         "queryEligible": True,
         "latencyClass": "slow",
-        "outputSchema": _OUTPUT_SCHEMA,
-        "pricing": {
-            "executeUsd": "0.001",
-        },
+        "pricing": {"executeUsd": "0.001"},
         "rateLimit": {
             "maxRequestsPerMinute": 10,
             "cooldownMs": 2000,
             "maxConcurrency": 2,
             "supportsBulk": False,
-            "notes": "Results cached 24h. Fresh fetches (force_refresh=True) take 10–30s.",
+            "notes": "Results cached 24h. Fresh fetches (force_refresh=True) take 10-30s.",
         },
     },
 )
 async def get_revenue_estimate(
     domain: str,
     force_refresh: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """
     Parameters
     ----------
@@ -183,13 +187,12 @@ async def get_revenue_estimate(
 
     estimate = predict_arr(signals)
 
-    # Return plain dict — NOT a Pydantic model — so outputSchema validates correctly
     return {
         "arr_estimate":     float(estimate["arr_estimate"]),
         "range_low":        float(estimate["range_low"]),
         "range_high":       float(estimate["range_high"]),
         "confidence_score": float(estimate["confidence_score"]),
-        "confidence_label": estimate["confidence_label"],
+        "confidence_label": str(estimate["confidence_label"]),
         "signal_breakdown": {
             "headcount": {
                 "total":      hc_raw,
