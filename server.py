@@ -4,7 +4,7 @@ import math
 import os
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from ctxprotocol import verify_context_request, ContextError
@@ -62,7 +62,7 @@ OUTPUT_SCHEMA = {
         "range_low":        {"type": "number",  "description": "Lower bound of ARR estimate in USD"},
         "range_high":       {"type": "number",  "description": "Upper bound of ARR estimate in USD"},
         "confidence_score": {"type": "number",  "description": "Confidence score 0.0–1.0"},
-        "confidence_label": {"type": "string",  "enum": ["Low", "Medium", "High"]},
+        "confidence_label": {"type": "string",  "enum": ["Low", "Medium", "High"], "description": "Human-readable confidence tier based on how many signals were available"},
         "signal_breakdown": {
             "type": "object",
             "description": "Raw signals used to produce the estimate",
@@ -70,51 +70,51 @@ OUTPUT_SCHEMA = {
                 "headcount": {
                     "type": "object",
                     "properties": {
-                        "total":      {"type": "integer"},
-                        "size_tier":  {"type": "string"},
-                        "source":     {"type": "string"},
-                        "confidence": {"type": "number"},
+                        "total":      {"type": "integer", "description": "LinkedIn employee count from Crustdata or fallback sources"},
+                        "size_tier":  {"type": "string",  "description": "Company size bucket: micro (<50), small (<200), mid (<1000), large (<5000), enterprise (5000+)"},
+                        "source":     {"type": "string",  "description": "Data source used: crustdata, pdl, serpapi, linkedin, or none"},
+                        "confidence": {"type": "number",  "description": "Confidence in headcount figure 0.0–1.0 based on source reliability"},
                     },
                     "required": ["total", "size_tier", "source", "confidence"],
                 },
                 "hiring": {
                     "type": "object",
                     "properties": {
-                        "open_roles":        {"type": "integer"},
-                        "open_roles_source": {"type": "string"},
-                        "velocity_score":    {"type": "number"},
-                        "scraper_source":    {"type": "string"},
+                        "open_roles":        {"type": "integer", "description": "Total open job postings found across all job boards"},
+                        "open_roles_source": {"type": "string",  "description": "Which job board or data source provided open_roles"},
+                        "velocity_score":    {"type": "number",  "description": "Hiring velocity 0.0–1.0: 0=no roles, 1.0=500+ open roles"},
+                        "scraper_source":    {"type": "string",  "description": "Job board scraper that returned results (greenhouse, lever, ashby, etc.)"},
                     },
                     "required": ["open_roles", "open_roles_source", "velocity_score", "scraper_source"],
                 },
                 "pricing": {
                     "type": "object",
                     "properties": {
-                        "model":         {"type": "string"},
-                        "estimated_acv": {"type": "number"},
-                        "confidence":    {"type": "number"},
+                        "model":         {"type": "string",  "description": "Detected pricing model: per_seat, flat, freemium, usage, enterprise, or unknown"},
+                        "estimated_acv": {"type": "number",  "description": "Estimated Annual Contract Value in USD based on pricing page"},
+                        "confidence":    {"type": "number",  "description": "Confidence in pricing extraction 0.0–1.0"},
                     },
                     "required": ["model", "estimated_acv", "confidence"],
                 },
                 "reviews": {
                     "type": "object",
                     "properties": {
-                        "total_reviews":     {"type": "integer"},
-                        "rating":            {"type": "number"},
-                        "momentum_score":    {"type": "number"},
-                        "source":            {"type": "string"},
-                        "g2_from_crustdata": {"type": "boolean"},
+                        "total_reviews":     {"type": "integer", "description": "Total number of reviews found on G2 or Trustpilot"},
+                        "rating":            {"type": "number",  "description": "Average rating out of 5.0"},
+                        "momentum_score":    {"type": "number",  "description": "Review momentum 0.0–1.0 combining volume, velocity, and rating"},
+                        "source":            {"type": "string",  "description": "Review platform: g2, trustpilot, or none"},
+                        "g2_from_crustdata": {"type": "boolean", "description": "True if G2 review count came from Crustdata rather than direct scrape"},
                     },
                     "required": ["total_reviews", "rating", "momentum_score", "source", "g2_from_crustdata"],
                 },
                 "traffic": {
                     "type": "object",
                     "properties": {
-                        "monthly_visits_estimate": {"type": "integer"},
-                        "rank":                    {"type": "integer"},
-                        "rank_score":              {"type": "number"},
-                        "source":                  {"type": "string"},
-                        "confidence":              {"type": "number"},
+                        "monthly_visits_estimate": {"type": "integer", "description": "Estimated monthly web visits derived from Tranco rank"},
+                        "rank":                    {"type": "integer",  "description": "Tranco top-1M rank (lower = more traffic); -1 if not in top 1M"},
+                        "rank_score":              {"type": "number",   "description": "Normalised traffic score 0.0–1.0 (rank 1=1.0, rank 1M=0.0)"},
+                        "source":                  {"type": "string",   "description": "Traffic data source (always 'tranco')"},
+                        "confidence":              {"type": "number",   "description": "Confidence in traffic signal 0.0–1.0"},
                     },
                     "required": ["monthly_visits_estimate", "rank", "rank_score", "source", "confidence"],
                 },
@@ -298,7 +298,17 @@ async def handle_mcp(body: dict, authorized: bool = False) -> dict:
                     },
                 }
 
-            result = await _estimate(domain, force_refresh=force_refresh)
+            try:
+                # Hard 55s ceiling — stays within Context Protocol's 60s Query limit
+                result = await asyncio.wait_for(_estimate(domain, force_refresh=force_refresh), timeout=55)
+            except asyncio.TimeoutError:
+                return {
+                    "jsonrpc": "2.0", "id": id_,
+                    "result": {
+                        "content": [{"type": "text", "text": f"Timeout: signals for {domain} took too long. Try again — results will be cached."}],
+                        "isError": True,
+                    },
+                }
 
             return {
                 "jsonrpc": "2.0", "id": id_,
