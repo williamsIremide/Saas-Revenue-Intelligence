@@ -2,7 +2,6 @@ import asyncio, uvicorn
 import os
 import math
 from datetime import datetime
-from pydantic import BaseModel
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_http_headers
@@ -37,7 +36,7 @@ _TIMEOUTS = {
     "hiring":    12,
     "pricing":   20,
     "reviews":   25,
-    "traffic":   20,   # first run downloads Tranco list (~10s), then disk-cached
+    "traffic":   20,
     "headcount": 20,
 }
 
@@ -59,9 +58,7 @@ async def _with_timeout(coro, timeout: int, empty: dict, label: str) -> dict:
         return empty
 
 
-# ── Plain HTTP health endpoint (no auth, no MCP) ──────────────────────────────
-# Railway hits GET /health to check container liveness.
-# This bypasses FastMCP and the auth middleware entirely.
+# ── Plain HTTP health endpoint ─────────────────────────────────────────────────
 async def _http_health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "saas-revenue-intelligence"})
 
@@ -83,30 +80,46 @@ class ContextProtocolAuth(Middleware):
 mcp.add_middleware(ContextProtocolAuth())
 
 
-# ── Response models ────────────────────────────────────────────────────────────
-class RevenueEstimate(BaseModel):
-    arr_estimate:     float
-    range_low:        float
-    range_high:       float
-    confidence_score: float
-    confidence_label: str
-    signal_breakdown: dict
-    fetched_at:       str
+# ── Explicit outputSchema (plain object — passes Context Protocol validation) ──
+_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "arr_estimate":     {"type": "number", "description": "Calibrated ARR point estimate in USD"},
+        "range_low":        {"type": "number", "description": "Low end of confidence range in USD"},
+        "range_high":       {"type": "number", "description": "High end of confidence range in USD"},
+        "confidence_score": {"type": "number", "description": "Signal confidence 0.0–1.0"},
+        "confidence_label": {"type": "string", "enum": ["Low", "Medium", "High"]},
+        "signal_breakdown": {
+            "type": "object",
+            "description": "Per-signal data used to generate the estimate",
+            "properties": {
+                "headcount": {"type": "object"},
+                "hiring":    {"type": "object"},
+                "pricing":   {"type": "object"},
+                "reviews":   {"type": "object"},
+                "traffic":   {"type": "object"},
+            },
+        },
+        "fetched_at": {"type": "string", "description": "ISO 8601 timestamp of when signals were fetched"},
+    },
+    "required": ["arr_estimate", "range_low", "range_high", "confidence_score", "confidence_label", "signal_breakdown", "fetched_at"],
+}
 
 
-# ── MCP tools ──────────────────────────────────────────────────────────────────
-
+# ── MCP tool — returns plain dict, not Pydantic model ─────────────────────────
 @mcp.tool(
     description=(
         "Estimate the Annual Recurring Revenue (ARR) of a SaaS company "
         "from its domain. Returns a calibrated estimate with confidence "
         "score and signal breakdown (headcount, hiring velocity, pricing "
-        "model, review momentum, traffic rank). Calibrated against S-1 ARR data."
+        "model, review momentum, traffic rank). Calibrated against S-1 ARR data. "
+        "Results cached 24h — fresh fetches take 10–30s."
     ),
     meta={
         "surface": "both",
         "queryEligible": True,
         "latencyClass": "slow",
+        "outputSchema": _OUTPUT_SCHEMA,
         "pricing": {
             "executeUsd": "0.001",
         },
@@ -115,17 +128,14 @@ class RevenueEstimate(BaseModel):
             "cooldownMs": 2000,
             "maxConcurrency": 2,
             "supportsBulk": False,
-            "notes": (
-                "Results are cached 24 h. "
-                "Fresh fetches (force_refresh=True) take 10–30 s — 5 signals run async."
-            ),
+            "notes": "Results cached 24h. Fresh fetches (force_refresh=True) take 10–30s.",
         },
     },
 )
 async def get_revenue_estimate(
     domain: str,
     force_refresh: bool = False,
-) -> RevenueEstimate:
+) -> dict:
     """
     Parameters
     ----------
@@ -173,13 +183,14 @@ async def get_revenue_estimate(
 
     estimate = predict_arr(signals)
 
-    return RevenueEstimate(
-        arr_estimate=estimate["arr_estimate"],
-        range_low=estimate["range_low"],
-        range_high=estimate["range_high"],
-        confidence_score=estimate["confidence_score"],
-        confidence_label=estimate["confidence_label"],
-        signal_breakdown={
+    # Return plain dict — NOT a Pydantic model — so outputSchema validates correctly
+    return {
+        "arr_estimate":     float(estimate["arr_estimate"]),
+        "range_low":        float(estimate["range_low"]),
+        "range_high":       float(estimate["range_high"]),
+        "confidence_score": float(estimate["confidence_score"]),
+        "confidence_label": estimate["confidence_label"],
+        "signal_breakdown": {
             "headcount": {
                 "total":      hc_raw,
                 "size_tier":  headcount.get("size_tier", "unknown"),
@@ -198,11 +209,11 @@ async def get_revenue_estimate(
                 "confidence":    pricing["confidence"],
             },
             "reviews": {
-                "total_reviews":       reviews_total,
-                "rating":              reviews_rating,
-                "momentum_score":      reviews["momentum_score"],
-                "source":              reviews["source"],
-                "g2_from_crustdata":   crustdata_extra.get("g2_reviews", 0) > 0 and reviews["total_reviews"] == 0,
+                "total_reviews":     reviews_total,
+                "rating":            reviews_rating,
+                "momentum_score":    reviews["momentum_score"],
+                "source":            reviews["source"],
+                "g2_from_crustdata": crustdata_extra.get("g2_reviews", 0) > 0 and reviews["total_reviews"] == 0,
             },
             "traffic": {
                 "monthly_visits_estimate": traffic["monthly_visits_estimate"],
@@ -212,14 +223,12 @@ async def get_revenue_estimate(
                 "confidence":              traffic["confidence"],
             },
         },
-        fetched_at=datetime.utcnow().isoformat(),
-    )
+        "fetched_at": datetime.utcnow().isoformat(),
+    }
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Mount /health as a plain HTTP route on the FastMCP ASGI app
     app = mcp.http_app()
     app.add_route("/health", _http_health, methods=["GET"])
-
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
