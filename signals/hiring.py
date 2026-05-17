@@ -3,9 +3,6 @@ import httpx
 from bs4 import BeautifulSoup
 from signals.cache import get_cache_if_fresh, set_cache, USE_CACHE, CACHE_VERSION
 
-
-# ── Fetchers ──────────────────────────────────────────────────────────────────
-
 async def fetch_greenhouse(client: httpx.AsyncClient, slug: str) -> tuple[list, str | None]:
     try:
         url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false"
@@ -99,7 +96,6 @@ async def fetch_rippling(client: httpx.AsyncClient, slug: str) -> tuple[list, st
     return [], None
 
 
-# ── Main engine ───────────────────────────────────────────────────────────────
 
 async def get_jobs(domain: str, force_refresh: bool = False) -> dict:
     normalized_domain = (

@@ -55,8 +55,6 @@ _COUNT_RE   = re.compile(
 _SNIPPET_RE = re.compile(r'([\d,]+)\s*(?:employees?|people)', re.IGNORECASE)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
 def _parse_count(text: str) -> int:
     """Extract the first plausible employee count from a text blob."""
     for pattern in (_COUNT_RE, _SNIPPET_RE):
@@ -131,86 +129,7 @@ def _is_own_domain(company_website: str, query_domain: str) -> bool:
     # Only accept empty remainder, trailing slash, or query string — no path segments
     return remainder in ("", "/") or remainder.startswith("?")
 
-# def _score_crustdata_record(rec: dict, query_domain: str) -> float:
-#     """
-#     Score a Crustdata record for how well it matches the queried domain.
 
-#     Returns a float 0.0–3.0. Higher = better match.
-
-#     Rules (in priority order):
-#     1. +2.0 if company_website_domain exactly matches (e.g. "notion.so" == "notion.so")
-#     2. +1.5 if company_website contains the query domain
-#     3. +0.5 if is_full_domain_match is True (Crustdata's own flag)
-#     4. -1.0 penalty if employee_count_range is "1-10" or "11-50" and headcount < 100
-#        (real SaaS companies we'd query have at least a few dozen staff)
-#     5. +0.3 bonus if hq_country is "USA" or "GBR" (most of our training set)
-
-#     The HKUST KRISS false-positive has:
-#       - company_website_domain = "notion.so"  (wrong — it's a hosted Notion page)
-#       - company_website = "https://www.notion.so/kriss-hkust/..."  (not notion.so the company)
-#       - hq_country = "" / hq_state = "Hong Kong"
-#       - employee_count_range = "11-50"
-#       - is_full_domain_match likely False
-
-#     The real Notion record would have:
-#       - company_website = "https://notion.so" or "https://www.notion.so"
-#       - company_website_domain = "notion.so"
-#       - hq_country = "USA"
-#       - employee_count_range = "1001-5000" or similar
-#     """
-#     score   = 0.0
-#     q = query_domain.lower().strip()
- 
-#     # ── 1. company_website_domain exact match (+2.0) ──────────────────────────
-#     cwd = (rec.get("company_website_domain") or "").lower().strip()
-#     if cwd == q:
-#         score += 2.0
- 
-#     # ── 2. company_website root-only match (+1.5) ─────────────────────────────
-#     # The website must point to the company's OWN root, not a page hosted there.
-#     # Valid:   "https://notion.so"  or  "https://notion.so/"
-#     # Invalid: "https://notion.so/isssues/abc123..."  ← hosted page
-#     # Invalid: "https://notion.so/kriss-hkust/..."    ← hosted page
-#     cw = (rec.get("company_website") or "").lower()
-#     cw_bare = cw.replace("https://", "").replace("http://", "").replace("www.", "")
-#     if cw_bare.startswith(q):
-#         remainder = cw_bare[len(q):]   # everything after the domain
-#         # Accept only if nothing follows, or just "/" or a query string
-#         remainder_is_root = remainder == "" or remainder == "/" or remainder.startswith("?")
-#         # Reject if remainder contains UUID-like or long hex strings (hosted doc pages)
-#         _UUID_RE = re.compile(r'[0-9a-f]{8,}', re.IGNORECASE)
-#         has_uuid_path = bool(_UUID_RE.search(remainder))
-#         if remainder_is_root and not has_uuid_path:
-#             score += 1.5
- 
-#     # ── 3. Crustdata's own domain-match flag (+0.5) ───────────────────────────
-#     if rec.get("is_full_domain_match"):
-#         score += 0.5
- 
-#     # ── 4. Small-org penalty (-1.0) ───────────────────────────────────────────
-#     # Real SaaS companies we'd query have meaningful headcounts.
-#     # Tiny orgs that happen to host pages on a platform domain are false positives.
-#     ecr = (rec.get("employee_count_range") or "").lower()
-#     hc_nested = rec.get("headcount") or {}
-#     hc = 0
-#     if isinstance(hc_nested, dict):
-#         hc = int(hc_nested.get("linkedin_headcount", 0) or 0)
-#     elif isinstance(hc_nested, (int, float)):
-#         hc = int(hc_nested)
-#     if hc == 0:
-#         hc = int(rec.get("employee_count", 0) or 0)
- 
-#     if ecr in ("1-10", "2-10", "11-50") or (0 < hc < 50):
-#         score -= 1.0
- 
-#     # ── 5. Geo bonus (+0.3) ───────────────────────────────────────────────────
-#     if (rec.get("hq_country") or "").upper() in ("USA", "GBR", "CAN", "AUS", "DEU", "SGP"):
-#         score += 0.3
- 
-#     return score
-
-
-# ── Fetchers ──────────────────────────────────────────────────────────────────
 
 async def _fetch_crustdata(client: httpx.AsyncClient, domain: str) -> tuple[int, dict]:
     """
@@ -636,25 +555,24 @@ async def get_headcount_signal(domain: str, force_refresh: bool = False) -> dict
     return result
 
 
-# ── Quick test ────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    import sys
+# if __name__ == "__main__":
+#     import sys
 
-    async def _test():
-        domains = sys.argv[1:] or [
-            "notion.so", "linear.app", "datadog.com",
-            "vercel.com", "stripe.com", "salesforce.com",
-        ]
-        print(f"{'Domain':<22} {'Count':>7}  {'Score':>6}  {'Source':<12} {'Tier':<12} {'Extra keys'}")
-        print("-" * 75)
-        for d in domains:
-            r = await get_headcount_signal(d, force_refresh=True)
-            extra_keys = list(r.get("extra", {}).keys())
-            print(
-                f"  {d:<20} {r['headcount']:>7}  "
-                f"{r['headcount_score']:>6.3f}  "
-                f"{r['source']:<12} {r['size_tier']:<12} {extra_keys}"
-            )
+#     async def _test():
+#         domains = sys.argv[1:] or [
+#             "notion.so", "linear.app", "datadog.com",
+#             "vercel.com", "stripe.com", "salesforce.com",
+#         ]
+#         print(f"{'Domain':<22} {'Count':>7}  {'Score':>6}  {'Source':<12} {'Tier':<12} {'Extra keys'}")
+#         print("-" * 75)
+#         for d in domains:
+#             r = await get_headcount_signal(d, force_refresh=True)
+#             extra_keys = list(r.get("extra", {}).keys())
+#             print(
+#                 f"  {d:<20} {r['headcount']:>7}  "
+#                 f"{r['headcount_score']:>6.3f}  "
+#                 f"{r['source']:<12} {r['size_tier']:<12} {extra_keys}"
+#             )
 
-    asyncio.run(_test())
+#     asyncio.run(_test())

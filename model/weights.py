@@ -49,7 +49,6 @@ EXCLUDE_DOMAINS: set[str] = set()
 MODEL_PATH      = "model/model.pkl"
 
 
-# ── Feature extraction ────────────────────────────────────────────────────────
 
 def parse_arr(arr_str: str) -> float:
     return float(str(arr_str).replace("_", ""))
@@ -148,7 +147,6 @@ def compute_weighted_score(signals: dict) -> float:
         return base * size_mult
 
 
-# ── Training ──────────────────────────────────────────────────────────────────
 
 def train_model(
     training_data_path: str = "model/training_data.json",
@@ -310,20 +308,20 @@ _HEADCOUNT_OVERRIDES = {
 }
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    train_model()
+# if __name__ == "__main__":
+#     train_model()
 
-    print("\n--- predict_arr smoke tests ---")
-    tests = [
-        ("Notion (~$330M)",  {"headcount": 3000, "open_roles": 144, "momentum": 0.41, "rank_score": 0.495, "acv": 480,  "headcount_score": 0.548, "review_conf": 0.7, "pricing_conf": 1.0, "traffic_conf": 0.9, "headcount_conf": 0.92}),
-        ("HubSpot (~$2.2B)", {"headcount": 11965,"open_roles": 0,   "momentum": 0.97, "rank_score": 0.599, "acv": 0,    "headcount_score": 1.0,   "review_conf": 1.0, "pricing_conf": 0.2, "traffic_conf": 0.9, "headcount_conf": 0.92}),
-        ("Linear (~$50M)",   {"headcount": 200,  "open_roles": 23,  "momentum": 0.41, "rank_score": 0.326, "acv": 1560, "headcount_score": 0.141, "review_conf": 0.7, "pricing_conf": 1.0, "traffic_conf": 0.75,"headcount_conf": 0.92}),
-        ("Calendly (~$100M)",{"headcount": 500,  "open_roles": 21,  "momentum": 0.59, "rank_score": 0.566, "acv": 300,  "headcount_score": 0.224, "review_conf": 0.7, "pricing_conf": 1.0, "traffic_conf": 0.9, "headcount_conf": 0.92}),
-        ("Vanta (~$100M)",   {"headcount": 500,  "open_roles": 150, "momentum": 0.40, "rank_score": 0.285, "acv": 0,    "headcount_score": 0.224, "review_conf": 0.7, "pricing_conf": 0.2, "traffic_conf": 0.75,"headcount_conf": 0.92}),
-    ]
-    for label, sigs in tests:
-        r = predict_arr(sigs)
-        print(
-            f"  {label:<22}  ${r['arr_estimate']/1e6:>6.0f}M  "
-            f"({r['confidence_label']}, {r['confidence_score']:.2f})"
-        )
+#     print("\n--- predict_arr smoke tests ---")
+#     tests = [
+#         ("Notion (~$330M)",  {"headcount": 3000, "open_roles": 144, "momentum": 0.41, "rank_score": 0.495, "acv": 480,  "headcount_score": 0.548, "review_conf": 0.7, "pricing_conf": 1.0, "traffic_conf": 0.9, "headcount_conf": 0.92}),
+#         ("HubSpot (~$2.2B)", {"headcount": 11965,"open_roles": 0,   "momentum": 0.97, "rank_score": 0.599, "acv": 0,    "headcount_score": 1.0,   "review_conf": 1.0, "pricing_conf": 0.2, "traffic_conf": 0.9, "headcount_conf": 0.92}),
+#         ("Linear (~$50M)",   {"headcount": 200,  "open_roles": 23,  "momentum": 0.41, "rank_score": 0.326, "acv": 1560, "headcount_score": 0.141, "review_conf": 0.7, "pricing_conf": 1.0, "traffic_conf": 0.75,"headcount_conf": 0.92}),
+#         ("Calendly (~$100M)",{"headcount": 500,  "open_roles": 21,  "momentum": 0.59, "rank_score": 0.566, "acv": 300,  "headcount_score": 0.224, "review_conf": 0.7, "pricing_conf": 1.0, "traffic_conf": 0.9, "headcount_conf": 0.92}),
+#         ("Vanta (~$100M)",   {"headcount": 500,  "open_roles": 150, "momentum": 0.40, "rank_score": 0.285, "acv": 0,    "headcount_score": 0.224, "review_conf": 0.7, "pricing_conf": 0.2, "traffic_conf": 0.75,"headcount_conf": 0.92}),
+#     ]
+#     for label, sigs in tests:
+#         r = predict_arr(sigs)
+#         print(
+#             f"  {label:<22}  ${r['arr_estimate']/1e6:>6.0f}M  "
+#             f"({r['confidence_label']}, {r['confidence_score']:.2f})"
+#         )

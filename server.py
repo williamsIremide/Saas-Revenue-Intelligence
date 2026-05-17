@@ -27,7 +27,6 @@ if not os.path.exists(_MODEL_PATH):
 
 app = FastAPI()
 
-# ── Per-signal timeouts ────────────────────────────────────────────────────────
 _TIMEOUTS = {
     "hiring":    12,
     "pricing":   20,
@@ -54,7 +53,6 @@ async def _with_timeout(coro, timeout: int, empty: dict, label: str) -> dict:
         return empty
 
 
-# ── Tool definitions ───────────────────────────────────────────────────────────
 OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -174,7 +172,6 @@ TOOLS = [
 ]
 
 
-# ── Core estimation logic ──────────────────────────────────────────────────────
 async def _estimate(domain: str, force_refresh: bool = False) -> dict:
     hiring, pricing, reviews, traffic, headcount = await asyncio.gather(
         _with_timeout(get_hiring_signal(domain,    force_refresh=force_refresh), _TIMEOUTS["hiring"],    _EMPTY_HIRING,    "hiring"),
@@ -262,7 +259,6 @@ async def _estimate(domain: str, force_refresh: bool = False) -> dict:
     }
 
 
-# ── MCP request handler ────────────────────────────────────────────────────────
 async def handle_mcp(body: dict, authorized: bool = False) -> dict:
     method = body.get("method")
     id_    = body.get("id")
@@ -319,7 +315,7 @@ async def handle_mcp(body: dict, authorized: bool = False) -> dict:
                 "jsonrpc": "2.0", "id": id_,
                 "result": {
                     "content": [{"type": "text", "text": json.dumps(result)}],
-                    "structuredContent": result,   # ← required by Context Protocol
+                    "structuredContent": result,   
                 },
             }
 
@@ -334,7 +330,6 @@ async def handle_mcp(body: dict, authorized: bool = False) -> dict:
     return {"jsonrpc": "2.0", "id": id_, "error": {"code": -32601, "message": "Method not found"}}
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {"status": "ok", "server": "saas-revenue-intelligence", "version": "1.0.0"}
@@ -345,7 +340,6 @@ async def mcp_post(request: Request):
     body = await request.json()
     method = body.get("method", "")
 
-    # tools/call requires auth; initialize and tools/list are open
     authorized = False
     if method == "tools/call":
         auth_header = request.headers.get("authorization", "")
@@ -359,7 +353,6 @@ async def mcp_post(request: Request):
     return JSONResponse(result)
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
