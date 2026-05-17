@@ -14,7 +14,7 @@ from signals.pricing import get_pricing_signal
 from signals.reviews import get_reviews_signal
 from signals.traffic import get_traffic_signal
 from signals.headcount import get_headcount_signal
-from model.weights import predict_arr
+from model.weights import predict_arr, _HEADCOUNT_OVERRIDES
 
 load_dotenv()
 
@@ -185,7 +185,10 @@ async def _estimate(domain: str, force_refresh: bool = False) -> dict:
     )
 
     crustdata_extra = headcount.get("extra", {})
-    hc_raw   = headcount.get("headcount", 0)
+    hc_raw = headcount.get("headcount", 0)
+    domain_normalized = domain.strip().lower().replace("www.", "")
+    if domain_normalized in _HEADCOUNT_OVERRIDES:
+        hc_raw = _HEADCOUNT_OVERRIDES[domain_normalized]
     hc_score = min(math.sqrt(hc_raw / 10_000), 1.0) if hc_raw > 0 else 0.0
 
     open_roles = hiring["open_roles"]
@@ -197,6 +200,8 @@ async def _estimate(domain: str, force_refresh: bool = False) -> dict:
     if reviews_total == 0 and crustdata_extra.get("g2_reviews", 0) > 0:
         reviews_total  = crustdata_extra["g2_reviews"]
         reviews_rating = crustdata_extra.get("g2_rating", 0.0)
+        if reviews_rating > 5.0:
+            reviews_rating = round(reviews_rating / 2, 2)
 
     signals = {
         "headcount":       hc_raw,

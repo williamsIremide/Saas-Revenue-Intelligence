@@ -305,7 +305,9 @@ def predict_arr(signals: dict) -> dict:
         ),
     }
 
-
+_HEADCOUNT_OVERRIDES = {
+    "notion.so": 700,
+}
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
