@@ -2,7 +2,7 @@ import asyncio
 import json
 import math
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -255,7 +255,7 @@ async def _estimate(domain: str, force_refresh: bool = False) -> dict:
                 "confidence":              traffic["confidence"],
             },
         },
-        "fetched_at": datetime.utcnow().isoformat(),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
 
 

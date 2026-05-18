@@ -2,7 +2,7 @@
 
 An MCP server that estimates the Annual Recurring Revenue (ARR) of any SaaS company from its domain. Deployed on [Context Protocol](https://ctxprotocol.com) as a paid tool — query it with a domain, get a calibrated ARR estimate with confidence score and signal breakdown.
 
-**Mean error: 1.35x** across 60 public SaaS companies with known ARRs.
+<!-- **Mean error: 1.35x** across 60 public SaaS companies with known ARRs. -->
 
 ---
 
@@ -70,11 +70,11 @@ python server.py
 | `PROXYCURL_API_KEY` | Optional | LinkedIn headcount (paid, most reliable) |
 | `PORT` | Optional | Server port (default: 8080) |
 
-For Context Protocol deployment:
+<!-- For Context Protocol deployment:
 
 | Variable | Description |
 |----------|-------------|
-| `CONTEXT_API_KEY` | Your Context Protocol API key |
+| `CONTEXT_API_KEY` | Your Context Protocol API key | -->
 
 ---
 
@@ -162,14 +162,14 @@ curl https://your-deployment.up.railway.app/mcp \
 
 ---
 
-## Deployment
+<!-- ## Deployment
 
 1. Push to GitHub
 2. New project on Railway → Deploy from GitHub repo
 3. Add all `.env` variables in Railway dashboard → Settings → Variables
 4. Railway auto-detects `railway.toml` and runs `python server.py`
 
-Once live, register your HTTPS endpoint at [ctxprotocol.com/contribute](https://ctxprotocol.com/contribute). After any code update, click **Refresh Skills** in the Context Protocol Developer Tools page.
+Once live, register your HTTPS endpoint at [ctxprotocol.com/contribute](https://ctxprotocol.com/contribute). After any code update, click **Refresh Skills** in the Context Protocol Developer Tools page. -->
 
 ---
 
@@ -186,11 +186,11 @@ Once live, register your HTTPS endpoint at [ctxprotocol.com/contribute](https://
 **Pricing:** Scraped pricing page → heuristic extraction → `unknown`
 
 ---
-
+<!-- 
 ## Known Limitations
 
 - **Small companies (<100 employees):** model tends to over-predict by 2–3x; confidence interval widens automatically.
 - **Reviews signal:** G2 and Trustpilot block scrapers intermittently; Crustdata G2 data used as fallback.
 - **JS-rendered pricing pages:** plain HTTP scraper can't render JavaScript; returns `unknown`.
 - **Static model:** does not self-improve from usage. Retrain manually after adding verified ARR rows to `training_data.json`.
-- **Headcount over-reporting:** PDL and Crustdata occasionally inflate headcounts for platform-hosted domains; domain validation in `headcount.py` handles most cases.
+- **Headcount over-reporting:** PDL and Crustdata occasionally inflate headcounts for platform-hosted domains; domain validation in `headcount.py` handles most cases. -->
