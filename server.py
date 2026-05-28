@@ -2,7 +2,9 @@ import asyncio
 import json
 import math
 import os
-from datetime import datetime, timezone
+import uvicorn
+from datetime import datetime
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -14,7 +16,7 @@ from signals.pricing import get_pricing_signal
 from signals.reviews import get_reviews_signal
 from signals.traffic import get_traffic_signal
 from signals.headcount import get_headcount_signal
-from model.weights import predict_arr, _HEADCOUNT_OVERRIDES
+from model.weights import predict_arr
 
 load_dotenv()
 
@@ -25,14 +27,18 @@ if not os.path.exists(_MODEL_PATH):
     train_model()
     print("[startup] model trained.")
 
-app = FastAPI()
+app = FastAPI(title="saas-revenue-intelligence")
 
+# ── Tightened timeouts — keeps total fan-out under 30s ───────────────────────
+# Previous: hiring=12, pricing=20, reviews=25, traffic=20, headcount=20
+# They ran concurrently but scrapers within each signal were sequential.
+# Now each signal has a hard ceiling that still allows one good scraper attempt.
 _TIMEOUTS = {
-    "hiring":    12,
-    "pricing":   20,
-    "reviews":   25,
-    "traffic":   20,
-    "headcount": 20,
+    "hiring":    8,   # ashby/greenhouse/lever — fast APIs, 8s is generous
+    "pricing":   10,  # single HTTP fetch + Claude fallback
+    "reviews":   12,  # G2/Trustpilot race, hard cap
+    "traffic":   8,   # Tranco disk lookup — near-instant when cached
+    "headcount": 12,  # Crustdata API call
 }
 
 _EMPTY_HIRING    = {"open_roles": 0, "engineering_roles": 0, "sales_roles": 0, "source": "timeout", "velocity_score": 0.0, "raw_titles": []}
@@ -53,89 +59,14 @@ async def _with_timeout(coro, timeout: int, empty: dict, label: str) -> dict:
         return empty
 
 
-OUTPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "arr_estimate":     {"type": "number",  "description": "Point estimate of ARR in USD"},
-        "range_low":        {"type": "number",  "description": "Lower bound of ARR estimate in USD"},
-        "range_high":       {"type": "number",  "description": "Upper bound of ARR estimate in USD"},
-        "confidence_score": {"type": "number",  "description": "Confidence score 0.0–1.0"},
-        "confidence_label": {"type": "string",  "enum": ["Low", "Medium", "High"], "description": "Human-readable confidence tier based on how many signals were available"},
-        "signal_breakdown": {
-            "type": "object",
-            "description": "Raw signals used to produce the estimate",
-            "properties": {
-                "headcount": {
-                    "type": "object",
-                    "properties": {
-                        "total":      {"type": "integer", "description": "LinkedIn employee count from Crustdata or fallback sources"},
-                        "size_tier":  {"type": "string",  "description": "Company size bucket: micro (<50), small (<200), mid (<1000), large (<5000), enterprise (5000+)"},
-                        "source":     {"type": "string",  "description": "Data source used: crustdata, pdl, serpapi, linkedin, or none"},
-                        "confidence": {"type": "number",  "description": "Confidence in headcount figure 0.0–1.0 based on source reliability"},
-                    },
-                    "required": ["total", "size_tier", "source", "confidence"],
-                },
-                "hiring": {
-                    "type": "object",
-                    "properties": {
-                        "open_roles":        {"type": "integer", "description": "Total open job postings found across all job boards"},
-                        "open_roles_source": {"type": "string",  "description": "Which job board or data source provided open_roles"},
-                        "velocity_score":    {"type": "number",  "description": "Hiring velocity 0.0–1.0: 0=no roles, 1.0=500+ open roles"},
-                        "scraper_source":    {"type": "string",  "description": "Job board scraper that returned results (greenhouse, lever, ashby, etc.)"},
-                    },
-                    "required": ["open_roles", "open_roles_source", "velocity_score", "scraper_source"],
-                },
-                "pricing": {
-                    "type": "object",
-                    "properties": {
-                        "model":         {"type": "string",  "description": "Detected pricing model: per_seat, flat, freemium, usage, enterprise, or unknown"},
-                        "estimated_acv": {"type": "number",  "description": "Estimated Annual Contract Value in USD based on pricing page"},
-                        "confidence":    {"type": "number",  "description": "Confidence in pricing extraction 0.0–1.0"},
-                    },
-                    "required": ["model", "estimated_acv", "confidence"],
-                },
-                "reviews": {
-                    "type": "object",
-                    "properties": {
-                        "total_reviews":     {"type": "integer", "description": "Total number of reviews found on G2 or Trustpilot"},
-                        "rating":            {"type": "number",  "description": "Average rating out of 5.0"},
-                        "momentum_score":    {"type": "number",  "description": "Review momentum 0.0–1.0 combining volume, velocity, and rating"},
-                        "source":            {"type": "string",  "description": "Review platform: g2, trustpilot, or none"},
-                        "g2_from_crustdata": {"type": "boolean", "description": "True if G2 review count came from Crustdata rather than direct scrape"},
-                    },
-                    "required": ["total_reviews", "rating", "momentum_score", "source", "g2_from_crustdata"],
-                },
-                "traffic": {
-                    "type": "object",
-                    "properties": {
-                        "monthly_visits_estimate": {"type": "integer", "description": "Estimated monthly web visits derived from Tranco rank"},
-                        "rank":                    {"type": "integer",  "description": "Tranco top-1M rank (lower = more traffic); -1 if not in top 1M"},
-                        "rank_score":              {"type": "number",   "description": "Normalised traffic score 0.0–1.0 (rank 1=1.0, rank 1M=0.0)"},
-                        "source":                  {"type": "string",   "description": "Traffic data source (always 'tranco')"},
-                        "confidence":              {"type": "number",   "description": "Confidence in traffic signal 0.0–1.0"},
-                    },
-                    "required": ["monthly_visits_estimate", "rank", "rank_score", "source", "confidence"],
-                },
-            },
-            "required": ["headcount", "hiring", "pricing", "reviews", "traffic"],
-        },
-        "fetched_at": {"type": "string", "description": "ISO timestamp"},
-    },
-    "required": [
-        "arr_estimate", "range_low", "range_high",
-        "confidence_score", "confidence_label",
-        "signal_breakdown", "fetched_at",
-    ],
-}
-
 TOOLS = [
     {
         "name": "get_revenue_estimate",
         "description": (
-            "Estimate the Annual Recurring Revenue (ARR) of a SaaS company "
-            "from its domain. Returns a calibrated estimate with confidence "
-            "score and signal breakdown (headcount, hiring velocity, pricing "
-            "model, review momentum, traffic rank). Calibrated against S-1 ARR data."
+            "Estimate the Annual Recurring Revenue (ARR) of a SaaS company from its domain. "
+            "Returns a calibrated estimate with confidence score and signal breakdown "
+            "(headcount, hiring velocity, pricing model, review momentum, traffic rank). "
+            "Calibrated against S-1 ARR data. Results cached 24h — fresh fetches take 10-30s."
         ),
         "inputSchema": {
             "type": "object",
@@ -144,7 +75,7 @@ TOOLS = [
                     "type": "string",
                     "description": "Company domain to analyse",
                     "default": "notion.so",
-                    "examples": ["notion.so", "hubspot.com", "linear.app"],
+                    "examples": ["notion.so", "hubspot.com", "stripe.com", "linear.app"],
                 },
                 "force_refresh": {
                     "type": "boolean",
@@ -154,7 +85,33 @@ TOOLS = [
             },
             "required": ["domain"],
         },
-        "outputSchema": OUTPUT_SCHEMA,
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "arr_estimate":     {"type": "number", "description": "Calibrated ARR point estimate in USD"},
+                "range_low":        {"type": "number", "description": "Low end of confidence range in USD"},
+                "range_high":       {"type": "number", "description": "High end of confidence range in USD"},
+                "confidence_score": {"type": "number", "description": "Signal confidence 0.0-1.0"},
+                "confidence_label": {"type": "string", "enum": ["Low", "Medium", "High"]},
+                "signal_breakdown": {
+                    "type": "object",
+                    "description": "Per-signal data used to generate the estimate",
+                    "properties": {
+                        "headcount": {"type": "object"},
+                        "hiring":    {"type": "object"},
+                        "pricing":   {"type": "object"},
+                        "reviews":   {"type": "object"},
+                        "traffic":   {"type": "object"},
+                    },
+                },
+                "fetched_at": {"type": "string", "description": "ISO 8601 timestamp"},
+            },
+            "required": [
+                "arr_estimate", "range_low", "range_high",
+                "confidence_score", "confidence_label",
+                "signal_breakdown", "fetched_at",
+            ],
+        },
         "_meta": {
             "surface": "both",
             "queryEligible": True,
@@ -165,14 +122,14 @@ TOOLS = [
                 "cooldownMs": 2000,
                 "maxConcurrency": 2,
                 "supportsBulk": False,
-                "notes": "Results cached 24h. Fresh fetches take 10–30s.",
+                "notes": "Results cached 24h. Cached responses return in <3s. Cold-cache fetches run 5 scrapers in parallel with 8-12s individual timeouts, typically completing in 15-25s.",
             },
         },
     }
 ]
 
 
-async def _estimate(domain: str, force_refresh: bool = False) -> dict:
+async def run_estimate(domain: str, force_refresh: bool = False) -> dict:
     hiring, pricing, reviews, traffic, headcount = await asyncio.gather(
         _with_timeout(get_hiring_signal(domain,    force_refresh=force_refresh), _TIMEOUTS["hiring"],    _EMPTY_HIRING,    "hiring"),
         _with_timeout(get_pricing_signal(domain,   force_refresh=force_refresh), _TIMEOUTS["pricing"],   _EMPTY_PRICING,   "pricing"),
@@ -182,10 +139,7 @@ async def _estimate(domain: str, force_refresh: bool = False) -> dict:
     )
 
     crustdata_extra = headcount.get("extra", {})
-    hc_raw = headcount.get("headcount", 0)
-    domain_normalized = domain.strip().lower().replace("www.", "")
-    if domain_normalized in _HEADCOUNT_OVERRIDES:
-        hc_raw = _HEADCOUNT_OVERRIDES[domain_normalized]
+    hc_raw   = headcount.get("headcount", 0)
     hc_score = min(math.sqrt(hc_raw / 10_000), 1.0) if hc_raw > 0 else 0.0
 
     open_roles = hiring["open_roles"]
@@ -197,9 +151,8 @@ async def _estimate(domain: str, force_refresh: bool = False) -> dict:
     if reviews_total == 0 and crustdata_extra.get("g2_reviews", 0) > 0:
         reviews_total  = crustdata_extra["g2_reviews"]
         reviews_rating = crustdata_extra.get("g2_rating", 0.0)
-        if reviews_rating > 5.0:
-            reviews_rating = round(reviews_rating / 2, 2)
 
+    # Pass pricing_model through so predict_arr can apply freemium multiplier
     signals = {
         "headcount":       hc_raw,
         "headcount_score": hc_score,
@@ -208,6 +161,7 @@ async def _estimate(domain: str, force_refresh: bool = False) -> dict:
         "velocity_score":  hiring["velocity_score"],
         "acv":             pricing["estimated_acv"],
         "pricing_conf":    pricing["confidence"],
+        "pricing_model":   pricing["pricing_model"],   # NEW — for freemium multiplier
         "momentum":        reviews["momentum_score"],
         "review_conf":     reviews["confidence"],
         "rank_score":      traffic["rank_score"],
@@ -217,11 +171,11 @@ async def _estimate(domain: str, force_refresh: bool = False) -> dict:
     estimate = predict_arr(signals)
 
     return {
-        "arr_estimate":     estimate["arr_estimate"],
-        "range_low":        estimate["range_low"],
-        "range_high":       estimate["range_high"],
-        "confidence_score": estimate["confidence_score"],
-        "confidence_label": estimate["confidence_label"],
+        "arr_estimate":     float(estimate["arr_estimate"]),
+        "range_low":        float(estimate["range_low"]),
+        "range_high":       float(estimate["range_high"]),
+        "confidence_score": float(estimate["confidence_score"]),
+        "confidence_label": str(estimate["confidence_label"]),
         "signal_breakdown": {
             "headcount": {
                 "total":      hc_raw,
@@ -255,11 +209,11 @@ async def _estimate(domain: str, force_refresh: bool = False) -> dict:
                 "confidence":              traffic["confidence"],
             },
         },
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_at": datetime.utcnow().isoformat(),
     }
 
 
-async def handle_mcp(body: dict, authorized: bool = False) -> dict:
+async def handle_mcp(body: dict, authorized: bool) -> dict:
     method = body.get("method")
     id_    = body.get("id")
 
@@ -269,7 +223,7 @@ async def handle_mcp(body: dict, authorized: bool = False) -> dict:
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "saas-revenue-intelligence", "version": "1.0.0"},
+                "serverInfo": {"name": "saas-revenue-intelligence", "version": "1.1.0"},
             },
         }
 
@@ -280,16 +234,14 @@ async def handle_mcp(body: dict, authorized: bool = False) -> dict:
         if not authorized:
             return {
                 "jsonrpc": "2.0", "id": id_,
-                "error": {"code": -32001, "message": "Unauthorized: Missing or invalid Authorization header"},
+                "error": {"code": -32001, "message": "Unauthorized"},
             }
 
-        name = body["params"]["name"]
-        args = body["params"].get("arguments", {})
+        name = body.get("params", {}).get("name")
+        args = body.get("params", {}).get("arguments", {})
 
         if name == "get_revenue_estimate":
-            domain        = args.get("domain", "")
-            force_refresh = args.get("force_refresh", False)
-
+            domain = args.get("domain", "").strip()
             if not domain:
                 return {
                     "jsonrpc": "2.0", "id": id_,
@@ -298,33 +250,39 @@ async def handle_mcp(body: dict, authorized: bool = False) -> dict:
                         "isError": True,
                     },
                 }
-
             try:
-                # Hard 55s ceiling — stays within Context Protocol's 60s Query limit
-                result = await asyncio.wait_for(_estimate(domain, force_refresh=force_refresh), timeout=55)
+                # Hard 50s ceiling — well within Context Protocol's 60s limit
+                result = await asyncio.wait_for(
+                    run_estimate(domain, force_refresh=args.get("force_refresh", False)),
+                    timeout=50,
+                )
+                return {
+                    "jsonrpc": "2.0", "id": id_,
+                    "result": {
+                        "structuredContent": result,
+                        "content": [{"type": "text", "text": json.dumps(result)}],
+                    },
+                }
             except asyncio.TimeoutError:
                 return {
                     "jsonrpc": "2.0", "id": id_,
                     "result": {
-                        "content": [{"type": "text", "text": f"Timeout: signals for {domain} took too long. Try again — results will be cached."}],
+                        "content": [{"type": "text", "text": f"Timeout fetching signals for {domain}. Try again — results will be cached after first fetch."}],
+                        "isError": True,
+                    },
+                }
+            except Exception as e:
+                return {
+                    "jsonrpc": "2.0", "id": id_,
+                    "result": {
+                        "content": [{"type": "text", "text": f"Error: {e}"}],
                         "isError": True,
                     },
                 }
 
-            return {
-                "jsonrpc": "2.0", "id": id_,
-                "result": {
-                    "content": [{"type": "text", "text": json.dumps(result)}],
-                    "structuredContent": result,   
-                },
-            }
-
         return {
             "jsonrpc": "2.0", "id": id_,
-            "result": {
-                "content": [{"type": "text", "text": f"Unknown tool: {name}"}],
-                "isError": True,
-            },
+            "result": {"content": [{"type": "text", "text": f"Unknown tool: {name}"}], "isError": True},
         }
 
     return {"jsonrpc": "2.0", "id": id_, "error": {"code": -32601, "message": "Method not found"}}
@@ -332,11 +290,11 @@ async def handle_mcp(body: dict, authorized: bool = False) -> dict:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": "saas-revenue-intelligence", "version": "1.0.0"}
+    return {"status": "ok", "server": "saas-revenue-intelligence", "version": "1.1.0"}
 
 
 @app.post("/mcp")
-async def mcp_post(request: Request):
+async def mcp_endpoint(request: Request):
     body = await request.json()
     method = body.get("method", "")
 
@@ -349,10 +307,9 @@ async def mcp_post(request: Request):
         except Exception:
             authorized = False
 
-    result = await handle_mcp(body, authorized=authorized)
+    result = await handle_mcp(body, authorized)
     return JSONResponse(result)
 
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
