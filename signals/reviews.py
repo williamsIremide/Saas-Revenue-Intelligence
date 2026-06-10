@@ -264,7 +264,7 @@ async def fetch_page(url: str) -> str:
                 name, html = t.result()
                 print(f"[reviews/{name}] success, {len(html)} bytes")
                 return html
-            # else: this provider failed, try next done task
+            print(f"[reviews] provider failed: {exc}")
 
     except Exception as e:
         print(f"[reviews] fetch_page error: {e}")
